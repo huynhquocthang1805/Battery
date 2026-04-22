@@ -1,211 +1,92 @@
 from __future__ import annotations
 
-from typing import Dict, List, Optional
-
 import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 
-from .utils import infer_schema, logger, missing_summary
+
+def plot_numeric_distribution(df: pd.DataFrame, col: str, color: str | None = None, title: str | None = None):
+    if col not in df.columns:
+        return None
+    return px.histogram(df, x=col, color=color, marginal="box", nbins=30, title=title or col)
 
 
-PLOTLY_TEMPLATE = "plotly_dark"
+def plot_categorical_distribution(df: pd.DataFrame, col: str):
+    if col not in df.columns:
+        return None
+    counts = df[col].astype(str).value_counts(dropna=False).reset_index()
+    counts.columns = [col, "count"]
+    return px.bar(counts, x=col, y="count", title=f"Distribution: {col}")
 
 
+def plot_ocv_curves(df: pd.DataFrame, x_col: str, y_cols: list[str]):
+    if x_col not in df.columns:
+        return None
+    fig = go.Figure()
+    for y in y_cols:
+        if y in df.columns:
+            fig.add_trace(go.Scatter(x=df[x_col], y=df[y], mode="lines", name=y))
+    fig.update_layout(title="OCV curves")
+    return fig
 
-def preview_table(df: pd.DataFrame, n: int = 20) -> pd.DataFrame:
-    return df.head(n)
 
+def plot_timeseries(df: pd.DataFrame, time_col: str, y_cols: list[str], title: str):
+    fig = go.Figure()
+    for y in y_cols:
+        if y in df.columns:
+            fig.add_trace(go.Scatter(x=df[time_col], y=df[y], mode="lines", name=y))
+    fig.update_layout(title=title, xaxis_title=time_col)
+    return fig
 
 
 def plot_missing_values(df: pd.DataFrame):
-    summary = missing_summary(df)
-    if summary.empty:
+    if df.empty:
         return None
-    summary = summary.head(30)
-    fig = px.bar(
-        summary,
-        x="column",
-        y="missing_pct",
-        title="Missing values (%)",
-        template=PLOTLY_TEMPLATE,
-    )
-    fig.update_layout(xaxis_tickangle=-45)
+    miss = df.isna().mean().sort_values(ascending=False).head(30)
+    return px.bar(x=miss.index, y=miss.values, title="Missing value ratio (top 30)")
+
+
+def plot_correlation_heatmap(df: pd.DataFrame, columns: list[str], title: str):
+    cols = [c for c in columns if c in df.columns and pd.api.types.is_numeric_dtype(df[c])]
+    if len(cols) < 2:
+        return None
+    corr = df[cols].corr(numeric_only=True)
+    return px.imshow(corr, text_auto=True, title=title)
+
+
+def plot_actual_vs_predicted(pred_df: pd.DataFrame, title: str):
+    if pred_df.empty:
+        return None
+    return px.scatter(pred_df, x="actual", y="predicted", trendline="ols", title=title)
+
+
+def plot_residuals(pred_df: pd.DataFrame, title: str):
+    if pred_df.empty:
+        return None
+    tmp = pred_df.copy()
+    tmp["residual"] = tmp["actual"] - tmp["predicted"]
+    return px.scatter(tmp, x="predicted", y="residual", title=title)
+
+
+def plot_feature_importance(feat_df: pd.DataFrame, title: str):
+    if feat_df is None or feat_df.empty:
+        return None
+    return px.bar(feat_df.head(20), x="importance", y="feature", orientation="h", title=title)
+
+
+def plot_risk_gauge(value: float, title: str = "Risk"):
+    fig = go.Figure(go.Indicator(mode="gauge+number", value=value, title={"text": title}, gauge={"axis": {"range": [0, 100]}}))
     return fig
 
 
-
-def plot_categorical_distribution(df: pd.DataFrame, column: str, title: Optional[str] = None):
-    if column not in df.columns:
-        return None
-    counts = df[column].astype(str).fillna("NA").value_counts(dropna=False).reset_index()
-    counts.columns = [column, "count"]
-    return px.bar(counts, x=column, y="count", title=title or f"Distribution: {column}", template=PLOTLY_TEMPLATE)
-
-
-
-def plot_numeric_distribution(df: pd.DataFrame, column: str, color: Optional[str] = None, title: Optional[str] = None):
-    if column not in df.columns:
-        return None
-    return px.histogram(
-        df,
-        x=column,
-        color=color if color in df.columns else None,
-        marginal="box",
-        nbins=40,
-        title=title or f"Distribution: {column}",
-        template=PLOTLY_TEMPLATE,
-    )
-
-
-
-def plot_ocv_curves(df: pd.DataFrame, x_col: str, y_cols: List[str], color_col: Optional[str] = None):
-    if df.empty or x_col not in df.columns or not y_cols:
-        return None
-    fig = go.Figure()
-    color_values = df[color_col].astype(str) if color_col and color_col in df.columns else None
-    for col in y_cols:
-        fig.add_trace(
-            go.Scatter(
-                x=df[x_col],
-                y=df[col],
-                mode="lines",
-                name=col,
-                line=dict(width=2),
-            )
-        )
-    fig.update_layout(title="OCV-related curves", template=PLOTLY_TEMPLATE, xaxis_title=x_col, yaxis_title="Voltage / OCV")
+def plot_lifetime_index(value: float, title: str = "Relative lifetime index"):
+    fig = go.Figure(go.Indicator(mode="gauge+number", value=value, title={"text": title}, gauge={"axis": {"range": [0, 100]}}))
     return fig
 
 
-
-def plot_timeseries(df: pd.DataFrame, x_col: str, y_cols: List[str], title: str):
-    if df.empty or x_col not in df.columns or not y_cols:
+def scenario_comparison_bar(df: pd.DataFrame, x_col: str, y_cols: list[str], title: str):
+    if df.empty:
         return None
-    fig = go.Figure()
-    for col in y_cols:
-        if col not in df.columns:
-            continue
-        fig.add_trace(go.Scatter(x=df[x_col], y=df[col], mode="lines", name=col))
-    fig.update_layout(template=PLOTLY_TEMPLATE, title=title, xaxis_title=x_col)
-    return fig
-
-
-
-def plot_correlation_heatmap(df: pd.DataFrame, columns: Optional[List[str]] = None, title: str = "Correlation heatmap"):
-    num_df = df.select_dtypes(include=[np.number])
-    if columns:
-        columns = [c for c in columns if c in num_df.columns]
-        num_df = num_df[columns]
-    if num_df.shape[1] < 2:
-        return None
-    corr = num_df.corr(numeric_only=True)
-    fig = px.imshow(corr, text_auto=False, aspect="auto", title=title, template=PLOTLY_TEMPLATE)
-    return fig
-
-
-
-def plot_actual_vs_predicted(predictions_df: pd.DataFrame, title: str = "Actual vs Predicted"):
-    if predictions_df.empty:
-        return None
-    fig = px.scatter(
-        predictions_df,
-        x="y_true",
-        y="y_pred",
-        trendline="ols",
-        title=title,
-        template=PLOTLY_TEMPLATE,
-    )
-    min_v = np.nanmin([predictions_df["y_true"].min(), predictions_df["y_pred"].min()])
-    max_v = np.nanmax([predictions_df["y_true"].max(), predictions_df["y_pred"].max()])
-    fig.add_shape(type="line", x0=min_v, y0=min_v, x1=max_v, y1=max_v, line=dict(dash="dash"))
-    return fig
-
-
-
-def plot_residuals(predictions_df: pd.DataFrame, title: str = "Residual plot"):
-    if predictions_df.empty:
-        return None
-    return px.scatter(
-        predictions_df,
-        x="y_pred",
-        y="residual",
-        title=title,
-        template=PLOTLY_TEMPLATE,
-    )
-
-
-
-def plot_feature_importance(feature_importance_df: pd.DataFrame, top_k: int = 20, title: str = "Feature importance"):
-    if feature_importance_df.empty:
-        return None
-    work = feature_importance_df.head(top_k).sort_values("importance", ascending=True)
-    return px.bar(
-        work,
-        x="importance",
-        y="feature",
-        orientation="h",
-        title=title,
-        template=PLOTLY_TEMPLATE,
-    )
-
-
-
-def plot_risk_gauge(score: float, title: str = "Degradation risk score"):
-    score = float(np.clip(score, 0, 100))
-    fig = go.Figure(
-        go.Indicator(
-            mode="gauge+number",
-            value=score,
-            title={"text": title},
-            gauge={
-                "axis": {"range": [0, 100]},
-                "bar": {"color": "orange"},
-                "steps": [
-                    {"range": [0, 33], "color": "#14532d"},
-                    {"range": [33, 66], "color": "#854d0e"},
-                    {"range": [66, 100], "color": "#7f1d1d"},
-                ],
-            },
-        )
-    )
-    fig.update_layout(template=PLOTLY_TEMPLATE)
-    return fig
-
-
-
-def plot_lifetime_index(score: float, title: str = "Relative lifetime index"):
-    score = float(np.clip(score, 0, 100))
-    fig = go.Figure(
-        go.Indicator(
-            mode="gauge+number",
-            value=score,
-            title={"text": title},
-            gauge={
-                "axis": {"range": [0, 100]},
-                "bar": {"color": "#60a5fa"},
-                "steps": [
-                    {"range": [0, 25], "color": "#7f1d1d"},
-                    {"range": [25, 50], "color": "#854d0e"},
-                    {"range": [50, 75], "color": "#14532d"},
-                    {"range": [75, 100], "color": "#166534"},
-                ],
-            },
-        )
-    )
-    fig.update_layout(template=PLOTLY_TEMPLATE)
-    return fig
-
-
-
-def scenario_comparison_bar(df: pd.DataFrame, x_col: str, y_cols: List[str], title: str):
-    if df.empty or x_col not in df.columns:
-        return None
-    fig = go.Figure()
-    for y_col in y_cols:
-        if y_col not in df.columns:
-            continue
-        fig.add_trace(go.Bar(name=y_col, x=df[x_col], y=df[y_col]))
-    fig.update_layout(barmode="group", template=PLOTLY_TEMPLATE, title=title)
-    return fig
+    y = y_cols[0]
+    return px.bar(df, x=x_col, y=y, title=title)

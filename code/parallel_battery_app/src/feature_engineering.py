@@ -1,369 +1,213 @@
 from __future__ import annotations
 
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Dict, List
 
 import numpy as np
 import pandas as pd
 
-from .utils import (
-    ColumnSchema,
-    as_ordered_unique,
-    compute_slope,
-    infer_schema,
-    logger,
-    rolling_stats,
-    safe_divide,
-)
+from .utils import infer_schema
 
 
-DEFAULT_NOMINAL_CAPACITY_AH = 5.0
-
-
-
-def _window_slices(n: int) -> Dict[str, slice]:
-    third = max(1, n // 3)
+def _safe_stats(arr: np.ndarray) -> Dict[str, float]:
+    arr = np.asarray(arr, dtype=float)
     return {
-        "start": slice(0, third),
-        "mid": slice(third, min(2 * third, n)),
-        "end": slice(min(2 * third, n - 1), n),
+        "mean": float(np.nanmean(arr)) if arr.size else np.nan,
+        "std": float(np.nanstd(arr)) if arr.size else np.nan,
+        "min": float(np.nanmin(arr)) if arr.size else np.nan,
+        "max": float(np.nanmax(arr)) if arr.size else np.nan,
+        "range": float(np.nanmax(arr) - np.nanmin(arr)) if arr.size else np.nan,
     }
 
 
-
-def _series_stats(values: pd.Series, prefix: str) -> Dict[str, float]:
-    arr = pd.to_numeric(values, errors="coerce").dropna()
-    if arr.empty:
-        return {
-            f"{prefix}_mean": np.nan,
-            f"{prefix}_std": np.nan,
-            f"{prefix}_max": np.nan,
-            f"{prefix}_min": np.nan,
-            f"{prefix}_range": np.nan,
-            f"{prefix}_slope": np.nan,
-            f"{prefix}_auc": np.nan,
-        }
-    x = np.arange(len(arr), dtype=float)
-    return {
-        f"{prefix}_mean": float(arr.mean()),
-        f"{prefix}_std": float(arr.std(ddof=0)),
-        f"{prefix}_max": float(arr.max()),
-        f"{prefix}_min": float(arr.min()),
-        f"{prefix}_range": float(arr.max() - arr.min()),
-        f"{prefix}_slope": compute_slope(x, arr.to_numpy()),
-        f"{prefix}_auc": float(np.trapz(arr.to_numpy(), x=x)),
-    }
+def _window(arr: np.ndarray, part: str) -> np.ndarray:
+    n = len(arr)
+    if n == 0:
+        return arr
+    w = max(1, int(n * 0.2))
+    if part == "start":
+        return arr[:w]
+    if part == "mid":
+        s = max(0, n // 2 - w // 2)
+        return arr[s:s + w]
+    return arr[-w:]
 
 
-
-def estimate_soc_by_coulomb_counting(
-    current_series: pd.Series,
-    dt_seconds: float = 1.0,
-    nominal_capacity_ah: float = DEFAULT_NOMINAL_CAPACITY_AH,
-    initial_soc: float = 1.0,
-) -> pd.Series:
-    current = pd.to_numeric(current_series, errors="coerce").fillna(0.0)
-    delta_ah = current * dt_seconds / 3600.0
-    soc = initial_soc - delta_ah.cumsum() / max(nominal_capacity_ah, 1e-9)
-    return soc.clip(lower=0.0, upper=1.05)
-
-
-
-def compute_pairwise_differences(df: pd.DataFrame, cols: List[str], prefix: str) -> Dict[str, float]:
-    out: Dict[str, float] = {}
-    if len(cols) < 2:
-        return out
-    for i in range(len(cols)):
-        for j in range(i + 1, len(cols)):
-            diff = (pd.to_numeric(df[cols[i]], errors="coerce") - pd.to_numeric(df[cols[j]], errors="coerce")).abs()
-            name = f"{prefix}_diff_{i+1}_{j+1}"
-            out[f"{name}_mean"] = float(diff.mean()) if not diff.empty else np.nan
-            out[f"{name}_max"] = float(diff.max()) if not diff.empty else np.nan
-    return out
-
-
-
-def compute_imbalance_metrics(group: pd.DataFrame, schema: ColumnSchema) -> Dict[str, float]:
-    metrics: Dict[str, float] = {}
-    current_matrix = group[schema.cell_current_cols].apply(pd.to_numeric, errors="coerce")
-    n = len(group)
-    windows = _window_slices(n)
-
-    sigma_i = current_matrix.std(axis=1, ddof=0)
-    spread_i = current_matrix.max(axis=1) - current_matrix.min(axis=1)
-
-    metrics["current_spread_mean"] = float(spread_i.mean()) if not spread_i.empty else np.nan
-    metrics["current_spread_max"] = float(spread_i.max()) if not spread_i.empty else np.nan
-    for key, window in windows.items():
-        sigma_window = sigma_i.iloc[window]
-        metrics[f"sigma_i_{key}"] = float(sigma_window.mean()) if not sigma_window.empty else np.nan
-
-    metrics.update(compute_pairwise_differences(group, schema.cell_current_cols, "current"))
-
-    if schema.cell_temp_cols:
-        temp_matrix = group[schema.cell_temp_cols].apply(pd.to_numeric, errors="coerce")
-        sigma_t = temp_matrix.std(axis=1, ddof=0)
-        delta_t = temp_matrix.max(axis=1) - temp_matrix.min(axis=1)
-        metrics["sigma_t_mean"] = float(sigma_t.mean()) if not sigma_t.empty else np.nan
-        metrics["delta_t_max"] = float(delta_t.max()) if not delta_t.empty else np.nan
-        metrics["temperature_gradient_auc"] = float(np.trapz(delta_t.fillna(0.0).to_numpy())) if not delta_t.empty else np.nan
-        metrics.update(compute_pairwise_differences(group, schema.cell_temp_cols, "temperature"))
-
-    return metrics
-
-
-
-def compute_soc_features(group: pd.DataFrame, schema: ColumnSchema) -> Dict[str, float]:
-    features: Dict[str, float] = {}
-    if not schema.cell_current_cols:
-        return features
-    dt_seconds = 1.0
-    if schema.time_col and schema.time_col in group.columns:
-        time_values = pd.to_numeric(group[schema.time_col], errors="coerce")
-        if time_values.notna().sum() >= 2:
-            diffs = time_values.diff().dropna()
-            dt_seconds = float(diffs.median()) if not diffs.empty else 1.0
-    soc_df = pd.DataFrame(index=group.index)
-    for current_col in schema.cell_current_cols:
-        soc_df[f"soc_{current_col}"] = estimate_soc_by_coulomb_counting(
-            group[current_col], dt_seconds=dt_seconds, nominal_capacity_ah=DEFAULT_NOMINAL_CAPACITY_AH
-        )
-    delta_soc = soc_df.max(axis=1) - soc_df.min(axis=1)
-    features["delta_soc_max"] = float(delta_soc.max()) if not delta_soc.empty else np.nan
-    features["delta_soc_end"] = float(delta_soc.iloc[-1]) if not delta_soc.empty else np.nan
-    features["sigma_soc_mean"] = float(soc_df.std(axis=1, ddof=0).mean()) if not soc_df.empty else np.nan
-    return features
-
-
-
-def compute_ttsb(group: pd.DataFrame, schema: ColumnSchema, threshold_a: float = 0.2) -> float:
-    if len(schema.cell_current_cols) < 2:
+def _slope(x: np.ndarray, y: np.ndarray) -> float:
+    if len(x) < 2 or len(y) < 2:
         return np.nan
-    currents = group[schema.cell_current_cols].apply(pd.to_numeric, errors="coerce")
-    branch_deviation = currents.sub(currents.mean(axis=1), axis=0).abs().sum(axis=1)
-    balanced_idx = np.where(branch_deviation.fillna(np.inf).to_numpy() <= threshold_a)[0]
-    if balanced_idx.size == 0:
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    mask = np.isfinite(x) & np.isfinite(y)
+    if mask.sum() < 2:
         return np.nan
-    idx = int(balanced_idx[0])
-    if schema.time_col and schema.time_col in group.columns:
-        return float(pd.to_numeric(group[schema.time_col], errors="coerce").iloc[idx])
-    return float(idx)
+    x = x[mask]
+    y = y[mask]
+    x = x - x.mean()
+    denom = np.dot(x, x)
+    if denom == 0:
+        return np.nan
+    return float(np.dot(x, y - y.mean()) / denom)
 
 
-
-def compute_dispersion_features(df: pd.DataFrame, columns: List[str], prefix: str) -> Dict[str, float]:
-    if not columns:
-        return {}
-    values = df[columns].apply(pd.to_numeric, errors="coerce")
-    flattened = values.to_numpy().astype(float).ravel()
-    flattened = flattened[np.isfinite(flattened)]
-    if flattened.size == 0:
-        return {}
-    mean_value = float(np.mean(flattened))
-    std_value = float(np.std(flattened))
-    return {
-        f"{prefix}_mean": mean_value,
-        f"{prefix}_std": std_value,
-        f"{prefix}_cv": safe_divide(std_value, mean_value, fill_value=np.nan),
-        f"{prefix}_min": float(np.min(flattened)),
-        f"{prefix}_max": float(np.max(flattened)),
-        f"{prefix}_range": float(np.max(flattened) - np.min(flattened)),
-    }
+def _auc(x: np.ndarray, y: np.ndarray) -> float:
+    if len(x) < 2 or len(y) < 2:
+        return np.nan
+    return float(np.trapz(np.nan_to_num(y, nan=0.0), np.nan_to_num(x, nan=0.0)))
 
 
-
-def compute_thermal_features(group: pd.DataFrame, schema: ColumnSchema) -> Dict[str, float]:
-    features: Dict[str, float] = {}
-    if not schema.cell_temp_cols:
-        return features
-    temp_matrix = group[schema.cell_temp_cols].apply(pd.to_numeric, errors="coerce")
-    max_temp = temp_matrix.max(axis=1)
-    min_temp = temp_matrix.min(axis=1)
-    mean_temp = temp_matrix.mean(axis=1)
-    delta_t = max_temp - min_temp
-    windows = _window_slices(len(group))
-
-    features.update(_series_stats(mean_temp, "module_temp_mean_series"))
-    features.update(_series_stats(delta_t, "module_temp_gradient_series"))
-    features["temp_peak"] = float(max_temp.max()) if not max_temp.empty else np.nan
-    features["temp_min"] = float(min_temp.min()) if not min_temp.empty else np.nan
-    features["temp_rise"] = float(mean_temp.iloc[-1] - mean_temp.iloc[0]) if len(mean_temp) >= 2 else np.nan
-
-    for name, window in windows.items():
-        sub = temp_matrix.iloc[window]
-        features[f"sigma_t_{name}"] = float(sub.std(axis=1, ddof=0).mean()) if not sub.empty else np.nan
-        delta_sub = sub.max(axis=1) - sub.min(axis=1)
-        features[f"delta_t_{name}"] = float(delta_sub.mean()) if not delta_sub.empty else np.nan
-
-    if schema.time_col and schema.time_col in group.columns:
-        t = pd.to_numeric(group[schema.time_col], errors="coerce").to_numpy()
-    else:
-        t = np.arange(len(group), dtype=float)
-
-    for col in schema.cell_temp_cols:
-        series = pd.to_numeric(group[col], errors="coerce")
-        features[f"{col}_slope"] = compute_slope(t, series.fillna(method="ffill").fillna(0.0).to_numpy())
-        features.update(rolling_stats(series.fillna(method="ffill").fillna(0.0), window=min(30, max(3, len(series) // 10 or 3))))
-
-    return features
-
-
-
-def compute_module_level_aggregates(group: pd.DataFrame, schema: ColumnSchema) -> Dict[str, float]:
-    features: Dict[str, float] = {}
-    if schema.module_current_col and schema.module_current_col in group.columns:
-        features.update(_series_stats(pd.to_numeric(group[schema.module_current_col], errors="coerce"), "module_current"))
-    if schema.module_voltage_col and schema.module_voltage_col in group.columns:
-        features.update(_series_stats(pd.to_numeric(group[schema.module_voltage_col], errors="coerce"), "module_voltage"))
-    return features
-
-
-
-def compute_static_metadata(group: pd.DataFrame, schema: ColumnSchema) -> Dict[str, object]:
-    out: Dict[str, object] = {}
-    for attr_name, col_name in [
-        ("chemistry", schema.chemistry_col),
-        ("ageing", schema.ageing_col),
-        ("operating_temperature", schema.operating_temp_col),
-        ("interconnection_resistance", schema.interconnection_res_col),
-        ("module_id", schema.module_id_col),
-    ]:
-        if col_name and col_name in group.columns:
-            value_series = group[col_name].dropna()
-            out[attr_name] = value_series.iloc[0] if not value_series.empty else np.nan
-    return out
-
+def _coulomb_soc(time_s: np.ndarray, current_a: np.ndarray, capacity_ah: float | None = None) -> np.ndarray:
+    if len(time_s) == 0:
+        return np.array([])
+    t = np.asarray(time_s, dtype=float)
+    i = np.asarray(current_a, dtype=float)
+    dt = np.diff(t, prepend=t[0])
+    if capacity_ah is None or not np.isfinite(capacity_ah) or capacity_ah <= 0:
+        capacity_ah = max(np.nansum(np.abs(i) * np.maximum(dt, 0)) / 3600.0, 1e-6)
+    delta = np.cumsum(i * np.maximum(dt, 0) / 3600.0) / capacity_ah
+    soc = 1.0 - delta
+    return soc
 
 
 def build_feature_table_from_timeseries(timeseries_df: pd.DataFrame) -> pd.DataFrame:
     if timeseries_df.empty:
         return pd.DataFrame()
     schema = infer_schema(timeseries_df)
-    if schema.time_col is None or len(schema.cell_current_cols) < 2:
-        logger.warning("Timeseries schema is incomplete for feature generation.")
-        return pd.DataFrame()
-
     group_cols = [c for c in [schema.test_id_col, schema.module_id_col, "source_file", "source_table"] if c and c in timeseries_df.columns]
     if not group_cols:
         timeseries_df = timeseries_df.copy()
         timeseries_df["synthetic_test_id"] = "test_001"
         group_cols = ["synthetic_test_id"]
-
-    rows: List[Dict[str, object]] = []
-    for group_key, group in timeseries_df.groupby(group_cols, dropna=False):
-        group = group.sort_values(schema.time_col).reset_index(drop=True)
-        row: Dict[str, object] = {}
-        if not isinstance(group_key, tuple):
-            group_key = (group_key,)
-        for col, val in zip(group_cols, group_key):
-            row[col] = val
-
-        row.update(compute_static_metadata(group, schema))
-        row.update(compute_module_level_aggregates(group, schema))
-        row.update(compute_imbalance_metrics(group, schema))
-        row.update(compute_soc_features(group, schema))
-        row.update(compute_thermal_features(group, schema))
-        row["ttsb"] = compute_ttsb(group, schema)
-
-        # Cell-current features and dispersion.
-        for col in schema.cell_current_cols:
-            row.update(_series_stats(pd.to_numeric(group[col], errors="coerce"), col))
-        row.update(compute_dispersion_features(group, schema.cell_current_cols, "current_cells"))
+    records: List[dict] = []
+    for keys, grp in timeseries_df.groupby(group_cols, dropna=False):
+        g = grp.sort_values(schema.time_col) if schema.time_col and schema.time_col in grp.columns else grp.copy()
+        rec = {}
+        if not isinstance(keys, tuple):
+            keys = (keys,)
+        for c, v in zip(group_cols, keys):
+            rec[c] = v
+        for c in [schema.chemistry_col, schema.ageing_col, schema.operating_temp_col, schema.interconnection_res_col]:
+            if c and c in g.columns:
+                val = g[c].dropna()
+                rec[c] = val.iloc[0] if not val.empty else np.nan
+        t = g[schema.time_col].to_numpy(dtype=float) if schema.time_col and schema.time_col in g.columns else np.arange(len(g), dtype=float)
+        rec["n_samples"] = len(g)
+        if schema.module_current_col and schema.module_current_col in g.columns:
+            mod_i = g[schema.module_current_col].to_numpy(dtype=float)
+            rec.update({f"module_current_{k}": v for k, v in _safe_stats(mod_i).items()})
+            rec["module_current_slope"] = _slope(t, mod_i)
+        if schema.module_voltage_col and schema.module_voltage_col in g.columns:
+            mod_v = g[schema.module_voltage_col].to_numpy(dtype=float)
+            rec.update({f"module_voltage_{k}": v for k, v in _safe_stats(mod_v).items()})
+            rec["module_voltage_slope"] = _slope(t, mod_v)
+        if schema.cell_current_cols:
+            current_mat = g[schema.cell_current_cols].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
+            sigma_i = np.nanstd(current_mat, axis=1)
+            pairwise = []
+            for i in range(current_mat.shape[1]):
+                for j in range(i + 1, current_mat.shape[1]):
+                    pairwise.append(np.nanmean(np.abs(current_mat[:, i] - current_mat[:, j])))
+            rec["current_spread_mean"] = float(np.nanmean(sigma_i))
+            rec["current_spread_auc"] = _auc(t, sigma_i)
+            rec["pairwise_current_diff_mean"] = float(np.nanmean(pairwise)) if pairwise else np.nan
+            for part in ["start", "mid", "end"]:
+                rec[f"sigma_i_{part}"] = float(np.nanmean(_window(sigma_i, part)))
+            for idx, col in enumerate(schema.cell_current_cols, 1):
+                vec = g[col].to_numpy(dtype=float)
+                rec.update({f"{col}_{k}": v for k, v in _safe_stats(vec).items()})
+                rec[f"{col}_slope"] = _slope(t, vec)
+            soc_mat = np.column_stack([_coulomb_soc(t, g[col].to_numpy(dtype=float)) for col in schema.cell_current_cols])
+            delta_soc = np.nanmax(soc_mat, axis=1) - np.nanmin(soc_mat, axis=1)
+            rec["delta_soc_max"] = float(np.nanmax(delta_soc))
+            rec["delta_soc_end"] = float(delta_soc[-1]) if len(delta_soc) else np.nan
         if schema.cell_temp_cols:
-            row.update(compute_dispersion_features(group, schema.cell_temp_cols, "temp_cells"))
+            temp_mat = g[schema.cell_temp_cols].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
+            sigma_t = np.nanstd(temp_mat, axis=1)
+            delta_t = np.nanmax(temp_mat, axis=1) - np.nanmin(temp_mat, axis=1)
+            rec["sigma_t_mean"] = float(np.nanmean(sigma_t))
+            rec["delta_t_max"] = float(np.nanmax(delta_t))
+            rec["temp_peak"] = float(np.nanmax(temp_mat))
+            rec["module_temp_gradient_series_auc"] = _auc(t, delta_t)
+            for part in ["start", "mid", "end"]:
+                rec[f"sigma_t_{part}"] = float(np.nanmean(_window(sigma_t, part)))
+                rec[f"delta_t_{part}"] = float(np.nanmean(_window(delta_t, part)))
+            rec["delta_t_start"] = rec.get("delta_t_start", np.nan)
+            rec["delta_t_mid"] = rec.get("delta_t_mid", np.nan)
+            rec["delta_t_end"] = rec.get("delta_t_end", np.nan)
+            if "ambient_temperature" in g.columns:
+                amb = pd.to_numeric(g["ambient_temperature"], errors="coerce").to_numpy(dtype=float)
+                rec["ambient_temperature"] = float(np.nanmean(amb))
+                rec["temp_rise_over_ambient"] = float(np.nanmax(np.nanmax(temp_mat, axis=1) - amb))
+            for idx, col in enumerate(schema.cell_temp_cols, 1):
+                vec = g[col].to_numpy(dtype=float)
+                rec.update({f"{col}_{k}": v for k, v in _safe_stats(vec).items()})
+                rec[f"{col}_slope"] = _slope(t, vec)
+        if schema.cell_current_cols:
+            sigma_i = g[schema.cell_current_cols].apply(pd.to_numeric, errors="coerce").to_numpy(dtype=float)
+            sigma_series = np.nanstd(sigma_i, axis=1)
+            threshold = 0.05 * np.nanmax(np.abs(g[schema.module_current_col].to_numpy(dtype=float))) if schema.module_current_col and schema.module_current_col in g.columns else 0.05
+            mask = sigma_series <= threshold
+            rec["ttsb"] = float(t[np.argmax(mask)] if mask.any() else np.nanmax(t)) if len(t) else np.nan
+        records.append(rec)
+    return pd.DataFrame(records)
 
-        row["n_samples"] = len(group)
-        rows.append(row)
 
-    feature_df = pd.DataFrame(rows)
-    feature_df.columns = [str(c) for c in feature_df.columns]
-    return feature_df
-
-
-
-def integrate_characterization_features(
-    feature_df: pd.DataFrame,
-    characterization_df: pd.DataFrame,
-) -> pd.DataFrame:
+def integrate_characterization_features(feature_df: pd.DataFrame, characterization_df: pd.DataFrame) -> pd.DataFrame:
     if feature_df.empty or characterization_df.empty:
         return feature_df
+    out = feature_df.copy()
     char = characterization_df.copy()
-    char.columns = [str(c) for c in char.columns]
     numeric_cols = char.select_dtypes(include=[np.number]).columns.tolist()
-    join_cols = [c for c in ["test_id", "module_id", "chemistry", "ageing", "source_file"] if c in char.columns and c in feature_df.columns]
-    if join_cols:
-        agg_map = {c: ["mean", "std", "min", "max"] for c in numeric_cols}
-        char_agg = char.groupby(join_cols, dropna=False).agg(agg_map)
-        char_agg.columns = ["_".join([lvl for lvl in col if lvl]) for col in char_agg.columns.to_flat_index()]
-        char_agg = char_agg.reset_index()
-        return feature_df.merge(char_agg, on=join_cols, how="left")
-
-    if numeric_cols:
-        global_summary = {}
-        for col in numeric_cols:
-            global_summary[f"char_{col}_mean"] = char[col].mean()
-            global_summary[f"char_{col}_std"] = char[col].std(ddof=0)
-        for col, value in global_summary.items():
-            feature_df[col] = value
-    return feature_df
-
+    if not numeric_cols:
+        return out
+    if "chemistry" in out.columns and "chemistry" in char.columns:
+        grp_cols = [c for c in ["chemistry", "ageing"] if c in char.columns and c in out.columns]
+        if grp_cols:
+            agg = char.groupby(grp_cols, dropna=False)[numeric_cols].mean().reset_index().add_prefix("char_")
+            rename_back = {f"char_{c}": c for c in grp_cols}
+            agg = agg.rename(columns=rename_back)
+            out = out.merge(agg, on=grp_cols, how="left")
+            return out
+    summary = char[numeric_cols].mean(numeric_only=True).add_prefix("global_char_")
+    for k, v in summary.items():
+        out[k] = v
+    return out
 
 
 def build_risk_scores(feature_df: pd.DataFrame) -> pd.DataFrame:
     if feature_df.empty:
         return feature_df
-    df = feature_df.copy()
-    harmful_candidates = [
-        "sigma_i_end",
-        "sigma_i_mid",
-        "delta_t_max",
-        "sigma_t_mean",
-        "delta_soc_max",
-        "ttsb",
-        "current_cells_std",
-        "temp_cells_std",
-    ]
-    capacity_candidates = [c for c in df.columns if "capacity" in c and df[c].dtype != object]
-    resistance_candidates = [c for c in df.columns if ("resistance" in c or "r0" in c) and df[c].dtype != object]
-
-    def zscore(series: pd.Series) -> pd.Series:
+    out = feature_df.copy()
+    drivers = {
+        "sigma_i_mean": out[[c for c in ["sigma_i_start", "sigma_i_mid", "sigma_i_end"] if c in out.columns]].mean(axis=1),
+        "delta_soc": out["delta_soc_max"] if "delta_soc_max" in out.columns else pd.Series(0.0, index=out.index),
+        "sigma_t": out["sigma_t_mean"] if "sigma_t_mean" in out.columns else pd.Series(0.0, index=out.index),
+        "delta_t": out["delta_t_max"] if "delta_t_max" in out.columns else pd.Series(0.0, index=out.index),
+        "ttsb": out["ttsb"] if "ttsb" in out.columns else pd.Series(0.0, index=out.index),
+    }
+    for name, series in list(drivers.items()):
         s = pd.to_numeric(series, errors="coerce")
-        std = s.std(ddof=0)
-        if pd.isna(std) or std == 0:
-            return pd.Series(np.zeros(len(s)), index=s.index)
-        return (s - s.mean()) / std
-
-    risk = pd.Series(0.0, index=df.index)
-    used_features: List[str] = []
-    for col in harmful_candidates:
-        if col in df.columns:
-            risk += zscore(df[col]).clip(lower=-3, upper=3)
-            used_features.append(col)
-
-    for col in resistance_candidates[:5]:
-        risk += 0.5 * zscore(df[col]).clip(lower=-3, upper=3)
-        used_features.append(col)
-
-    for col in capacity_candidates[:5]:
-        risk -= 0.35 * zscore(df[col]).clip(lower=-3, upper=3)
-        used_features.append(col)
-
-    if "ageing" in df.columns:
-        ageing = df["ageing"].astype(str).str.lower().str.contains("aged|true|1|yes")
-        risk += ageing.astype(float) * 0.75
-        used_features.append("ageing")
-
-    if "chemistry" in df.columns:
-        mix = df["chemistry"].astype(str).str.lower().str.contains("mix|nca.*nmc|nmc.*nca")
-        risk += mix.astype(float) * 0.5
-        used_features.append("chemistry")
-
-    risk_score = (risk - risk.min()) / max((risk.max() - risk.min()), 1e-9) * 100.0
-    df["degradation_risk_score"] = risk_score.clip(0, 100)
-    df["relative_lifetime_index"] = (100 - df["degradation_risk_score"]).clip(0, 100)
-    df["estimated_cycle_life_band"] = pd.cut(
-        df["relative_lifetime_index"],
-        bins=[-0.1, 25, 50, 75, 100],
-        labels=["Very Low", "Low", "Moderate", "High"],
+        if s.notna().sum() == 0:
+            drivers[name] = pd.Series(0.0, index=out.index)
+        else:
+            lo, hi = float(s.min()), float(s.max())
+            drivers[name] = (s - lo) / (hi - lo) if hi > lo else pd.Series(0.0, index=out.index)
+    age_penalty = pd.Series(0.0, index=out.index)
+    if "ageing" in out.columns:
+        age_penalty = out["ageing"].astype(str).str.lower().isin(["aged", "yes", "1"]).astype(float)
+    mix_penalty = pd.Series(0.0, index=out.index)
+    if "chemistry" in out.columns:
+        mix_penalty = out["chemistry"].astype(str).str.lower().isin(["mix", "mixed"]).astype(float)
+    score = 100 * (
+        0.24 * drivers["sigma_i_mean"] +
+        0.16 * drivers["delta_soc"] +
+        0.20 * drivers["sigma_t"] +
+        0.16 * drivers["delta_t"] +
+        0.12 * drivers["ttsb"] +
+        0.07 * age_penalty +
+        0.05 * mix_penalty
     )
-    df["risk_model_features_used"] = ", ".join(as_ordered_unique(used_features))
-    return df
+    out["degradation_risk_score"] = score.clip(0, 100)
+    out["relative_lifetime_index"] = (100 - out["degradation_risk_score"]).clip(0, 100)
+    out["estimated_cycle_life_band"] = pd.cut(out["relative_lifetime_index"], bins=[-1, 33, 66, 100], labels=["low", "medium", "high"])
+    out["risk_model_features_used"] = "sigma_I, delta_SoC, sigma_T, delta_T, TTSB, ageing, chemistry_mix"
+    return out

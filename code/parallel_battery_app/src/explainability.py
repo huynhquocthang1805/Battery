@@ -1,139 +1,74 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import List, Optional
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-from sklearn.inspection import PartialDependenceDisplay
-from sklearn.pipeline import Pipeline
-
-from .utils import logger
 
 try:
     import shap  # type: ignore
-except Exception:  # pragma: no cover
+except Exception:
     shap = None
+
+from sklearn.inspection import PartialDependenceDisplay
 
 
 @dataclass
 class ShapArtifacts:
     values: Optional[np.ndarray]
-    expected_value: Optional[float]
+    data: pd.DataFrame
     feature_names: List[str]
-    transformed_X: Optional[np.ndarray]
 
 
-
-def transform_features(pipeline: Pipeline, X: pd.DataFrame) -> Tuple[np.ndarray, List[str]]:
-    preprocessor = pipeline.named_steps["preprocessor"]
-    transformed = preprocessor.transform(X)
-    feature_names = preprocessor.get_feature_names_out().tolist()
-    return transformed, feature_names
-
+def auto_explanation_text(feature_importance_df: pd.DataFrame, target: str) -> str:
+    if feature_importance_df is None or feature_importance_df.empty:
+        return f"No explainability summary available for {target}."
+    top = feature_importance_df.head(5)["feature"].tolist()
+    return f"Top drivers for {target}: " + ", ".join(top)
 
 
-def compute_shap_artifacts(pipeline: Pipeline, X: pd.DataFrame, max_samples: int = 500) -> ShapArtifacts:
+def summarize_feature_effects(feature_importance_df: pd.DataFrame) -> str:
+    if feature_importance_df.empty:
+        return "No feature importance available."
+    lines = [f"- {r.feature}: {r.importance:.4f}" for r in feature_importance_df.head(10).itertuples()]
+    return "\n".join(lines)
+
+
+def compute_shap_artifacts(pipeline, X: pd.DataFrame) -> ShapArtifacts:
     if shap is None:
-        return ShapArtifacts(values=None, expected_value=None, feature_names=[], transformed_X=None)
-
-    X_sample = X.head(max_samples).copy()
-    transformed_X, feature_names = transform_features(pipeline, X_sample)
+        raise RuntimeError("shap is not installed")
+    sample = X.head(min(200, len(X))).copy()
+    prep = pipeline.named_steps["preprocessor"]
     model = pipeline.named_steps["model"]
-
-    try:
-        if hasattr(model, "feature_importances_"):
-            explainer = shap.TreeExplainer(model)
-            shap_values = explainer.shap_values(transformed_X)
-            expected_value = float(np.ravel(explainer.expected_value)[0]) if np.size(explainer.expected_value) else None
-        else:
-            explainer = shap.Explainer(model.predict, transformed_X)
-            explanation = explainer(transformed_X)
-            shap_values = explanation.values
-            expected_value = float(np.ravel(explanation.base_values)[0]) if np.size(explanation.base_values) else None
-        return ShapArtifacts(
-            values=np.array(shap_values),
-            expected_value=expected_value,
-            feature_names=feature_names,
-            transformed_X=np.array(transformed_X),
-        )
-    except Exception as exc:
-        logger.warning("SHAP computation failed: %s", exc)
-        return ShapArtifacts(values=None, expected_value=None, feature_names=feature_names, transformed_X=None)
-
+    X_proc = prep.transform(sample)
+    feature_names = list(prep.get_feature_names_out())
+    explainer = shap.Explainer(model, X_proc)
+    values = explainer(X_proc).values
+    return ShapArtifacts(values=values, data=pd.DataFrame(X_proc, columns=feature_names), feature_names=feature_names)
 
 
 def make_shap_summary_figure(artifacts: ShapArtifacts):
-    if shap is None or artifacts.values is None or artifacts.transformed_X is None:
+    if artifacts.values is None:
         return None
-    fig = plt.figure(figsize=(10, 6))
-    shap.summary_plot(
-        artifacts.values,
-        artifacts.transformed_X,
-        feature_names=artifacts.feature_names,
-        show=False,
-        plot_size=(10, 6),
-    )
+    fig = plt.figure(figsize=(8, 5))
+    shap.summary_plot(artifacts.values, artifacts.data, feature_names=artifacts.feature_names, show=False)
     return fig
 
 
-
-def make_shap_dependence_figure(artifacts: ShapArtifacts, feature_name: str):
-    if shap is None or artifacts.values is None or artifacts.transformed_X is None:
+def make_shap_dependence_figure(artifacts: ShapArtifacts, feature: str):
+    if artifacts.values is None or feature not in artifacts.feature_names:
         return None
-    if feature_name not in artifacts.feature_names:
-        return None
-    fig = plt.figure(figsize=(8, 6))
-    shap.dependence_plot(
-        feature_name,
-        artifacts.values,
-        artifacts.transformed_X,
-        feature_names=artifacts.feature_names,
-        show=False,
-    )
+    fig = plt.figure(figsize=(7, 5))
+    shap.dependence_plot(feature, artifacts.values, artifacts.data, feature_names=artifacts.feature_names, show=False)
     return fig
 
 
-
-def make_pdp_figure(pipeline: Pipeline, X: pd.DataFrame, feature_name: str):
-    fig, ax = plt.subplots(figsize=(8, 5))
+def make_pdp_figure(pipeline, X: pd.DataFrame, feature: str):
     try:
-        PartialDependenceDisplay.from_estimator(
-            pipeline,
-            X,
-            [feature_name],
-            ax=ax,
-            kind="average",
-            grid_resolution=20,
-        )
+        fig, ax = plt.subplots(figsize=(7, 4))
+        PartialDependenceDisplay.from_estimator(pipeline, X.head(min(500, len(X))), [feature], ax=ax)
         return fig
-    except Exception as exc:
-        logger.warning("PDP failed for %s: %s", feature_name, exc)
-        plt.close(fig)
+    except Exception:
         return None
-
-
-
-def summarize_feature_effects(feature_importance_df: pd.DataFrame, top_k: int = 5) -> str:
-    if feature_importance_df.empty:
-        return "Chưa có feature importance để giải thích."
-    top = feature_importance_df.head(top_k)
-    bullets = [f"- {row.feature}: importance={row.importance:.4f}" for row in top.itertuples(index=False)]
-    return "\n".join(bullets)
-
-
-
-def auto_explanation_text(feature_importance_df: pd.DataFrame, target_name: str) -> str:
-    if feature_importance_df.empty:
-        return f"Chưa đủ thông tin để giải thích yếu tố nào làm tăng {target_name}."
-    top_features = feature_importance_df.head(5)["feature"].tolist()
-    text = [f"Các yếu tố chi phối mạnh nhất đối với {target_name} hiện tại là: {', '.join(top_features)}."]
-    joined = " ".join(top_features).lower()
-    if "interconnection" in joined or "resistance" in joined:
-        text.append("Điện trở liên kết hoặc nội trở đang là driver quan trọng, phù hợp với kết quả từ các paper tham chiếu.")
-    if "temperature" in joined or "temp" in joined:
-        text.append("Nhiệt độ/gradient nhiệt đang tác động rõ tới response; cần kiểm soát thermal management tốt hơn.")
-    if "chemistry" in joined or "ageing" in joined or "aging" in joined:
-        text.append("Sự khác biệt chemistry hoặc aged/unaged mismatch đang đóng góp vào bất cân bằng hiệu năng.")
-    return " ".join(text)
