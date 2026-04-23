@@ -111,15 +111,23 @@ def filter_useful_timeseries_tables(tables):
     useful = []
     for t in tables:
         cols = {str(c).lower() for c in t.df.columns}
-        name = f"{t.source_file}_{t.table_name}".lower()
-        if t.table_name.lower() == "data" and (
-            "test_time_s" in cols or "current_a" in cols or "voltage_v" in cols
+        file_name = t.source_file.lower()
+        table_name = t.table_name.lower()
+
+        if table_name == "data" and (file_name.startswith("m1_") or file_name.startswith("m2_")):
+            useful.append(t)
+            continue
+
+        if {"test_time_s", "current_a", "voltage_v"} <= cols:
+            useful.append(t)
+            continue
+
+        if any(c.startswith("current_a_cell") for c in cols) or any(
+            c.startswith("temperature_c_cell") for c in cols
         ):
             useful.append(t)
             continue
-        if "module" in name or "discharge" in name or "m1_" in name or "m2_" in name:
-            if {"test_time_s", "current_a", "voltage_v"} & cols:
-                useful.append(t)
+
     return useful
 
 
@@ -353,20 +361,6 @@ def main():
         if fig is not None:
             st.plotly_chart(fig, width="stretch")
 
-        dist_cols = st.columns(4)
-        for idx, col_name in enumerate(
-            ["chemistry", "ageing", "operating_temperature", "interconnection_resistance"]
-        ):
-            if col_name in feature_df.columns:
-                dtype_str = str(feature_df[col_name].dtype)
-                fig = (
-                    plot_categorical_distribution(feature_df, col_name)
-                    if feature_df[col_name].dtype == object or dtype_str.startswith("string")
-                    else plot_numeric_distribution(feature_df, col_name)
-                )
-                if fig is not None:
-                    dist_cols[idx].plotly_chart(fig, width="stretch")
-
     with tabs[1]:
         st.subheader("Cell Characterization")
         if prepared.characterization_df.empty:
@@ -380,32 +374,13 @@ def main():
             color_col = st.selectbox("Color by", options=["<none>"] + color_candidates, key="char_color")
             color_col = None if color_col == "<none>" else color_col
             if capacity_cols:
-                st.plotly_chart(
-                    plot_numeric_distribution(
-                        prepared.characterization_df,
-                        capacity_cols[0],
-                        color=color_col,
-                        title="Capacity distribution",
-                    ),
-                    width="stretch",
-                )
+                st.plotly_chart(plot_numeric_distribution(prepared.characterization_df, capacity_cols[0], color=color_col, title="Capacity distribution"), width="stretch")
             if resistance_cols:
-                st.plotly_chart(
-                    plot_numeric_distribution(
-                        prepared.characterization_df,
-                        resistance_cols[0],
-                        color=color_col,
-                        title="Resistance distribution",
-                    ),
-                    width="stretch",
-                )
+                st.plotly_chart(plot_numeric_distribution(prepared.characterization_df, resistance_cols[0], color=color_col, title="Resistance distribution"), width="stretch")
             if ocv_cols:
                 x_candidates = [c for c in prepared.characterization_df.columns if c not in ocv_cols][:5]
                 if x_candidates:
-                    st.plotly_chart(
-                        plot_ocv_curves(prepared.characterization_df.head(500), x_candidates[0], ocv_cols[:6]),
-                        width="stretch",
-                    )
+                    st.plotly_chart(plot_ocv_curves(prepared.characterization_df.head(500), x_candidates[0], ocv_cols[:6]), width="stretch")
             st.dataframe(prepared.characterization_df.head(50), width="stretch")
 
     with tabs[2]:
@@ -413,11 +388,7 @@ def main():
         if prepared.timeseries_df.empty:
             st.warning("Không có timeseries để phân tích.")
         else:
-            candidate_group_cols = [
-                c
-                for c in ["test_id", "module_id", "source_file", "source_table", "synthetic_test_id"]
-                if c in prepared.timeseries_df.columns
-            ]
+            candidate_group_cols = [c for c in ["test_id", "module_id", "source_file", "source_table", "synthetic_test_id"] if c in prepared.timeseries_df.columns]
             case_df = prepared.timeseries_df.copy()
             if candidate_group_cols:
                 selector_col = candidate_group_cols[0]
@@ -427,39 +398,9 @@ def main():
 
             schema = prepared.schema_timeseries
             if schema and schema.time_col and schema.cell_current_cols:
-                st.plotly_chart(
-                    plot_timeseries(case_df, schema.time_col, schema.cell_current_cols, "Current time-series of each cell"),
-                    width="stretch",
-                )
+                st.plotly_chart(plot_timeseries(case_df, schema.time_col, schema.cell_current_cols, "Current time-series of each cell"), width="stretch")
                 if schema.cell_temp_cols:
-                    st.plotly_chart(
-                        plot_timeseries(case_df, schema.time_col, schema.cell_temp_cols, "Temperature time-series of each cell"),
-                        width="stretch",
-                    )
-
-            metrics = [
-                c
-                for c in [
-                    "sigma_i_start",
-                    "sigma_i_mid",
-                    "sigma_i_end",
-                    "current_spread_mean",
-                    "delta_soc_max",
-                    "delta_t_max",
-                    "sigma_t_mean",
-                    "ttsb",
-                ]
-                if c in feature_df.columns
-            ]
-            if metrics:
-                st.dataframe(feature_df[metrics].head(20), width="stretch")
-                heat = plot_correlation_heatmap(
-                    feature_df,
-                    metrics + [c for c in ["operating_temperature", "interconnection_resistance"] if c in feature_df.columns],
-                    "Feature/imbalance correlation",
-                )
-                if heat is not None:
-                    st.plotly_chart(heat, width="stretch")
+                    st.plotly_chart(plot_timeseries(case_df, schema.time_col, schema.cell_temp_cols, "Temperature time-series of each cell"), width="stretch")
 
     with tabs[3]:
         st.subheader("Forecast Temperature / Thermal Factors")
@@ -470,25 +411,11 @@ def main():
             st.write("Các cột hiện có:", feature_df.columns.tolist())
         else:
             thermal_target = st.selectbox("Thermal target", options=targets["thermal"], key="thermal_target")
-            thermal_model_name = st.selectbox(
-                "Model",
-                options=["Linear Regression", "Ridge", "Random Forest", "XGBoost"],
-                key="thermal_model",
-            )
-            group_col = st.selectbox(
-                "Group column for split",
-                options=["<none>"] + [c for c in ["test_id", "module_id", "source_file"] if c in feature_df.columns],
-                key="thermal_group",
-            )
+            thermal_model_name = st.selectbox("Model", options=["Linear Regression", "Ridge", "Random Forest", "XGBoost"], key="thermal_model")
+            group_col = st.selectbox("Group column for split", options=["<none>"] + [c for c in ["test_id", "module_id", "source_file"] if c in feature_df.columns], key="thermal_group")
             if st.button("Train thermal model", key="train_thermal"):
                 try:
-                    result = train_regression_model(
-                        feature_df,
-                        thermal_target,
-                        thermal_model_name,
-                        None if group_col == "<none>" else group_col,
-                        exclude_cols=["estimated_cycle_life_band", "risk_model_features_used"],
-                    )
+                    result = train_regression_model(feature_df, thermal_target, thermal_model_name, None if group_col == "<none>" else group_col, exclude_cols=["estimated_cycle_life_band", "risk_model_features_used"])
                     st.session_state["thermal_model_result"] = result
                     st.success("Thermal model trained successfully.")
                 except Exception as exc:
@@ -504,7 +431,6 @@ def main():
                 ]:
                     if fig is not None:
                         st.plotly_chart(fig, width="stretch")
-                st.markdown(auto_explanation_text(result.feature_importance_df, thermal_target))
 
     with tabs[4]:
         st.subheader("Forecast Current Imbalance")
@@ -515,25 +441,11 @@ def main():
             st.write("Các cột hiện có:", feature_df.columns.tolist())
         else:
             current_target = st.selectbox("Target", options=targets["current"], key="current_target")
-            model_name = st.selectbox(
-                "Model",
-                options=["Linear Regression", "Ridge", "Random Forest", "XGBoost"],
-                key="current_model",
-            )
-            group_col = st.selectbox(
-                "Group column for split",
-                options=["<none>"] + [c for c in ["test_id", "module_id", "source_file"] if c in feature_df.columns],
-                key="current_group",
-            )
+            model_name = st.selectbox("Model", options=["Linear Regression", "Ridge", "Random Forest", "XGBoost"], key="current_model")
+            group_col = st.selectbox("Group column for split", options=["<none>"] + [c for c in ["test_id", "module_id", "source_file"] if c in feature_df.columns], key="current_group")
             if st.button("Train imbalance model", key="train_current"):
                 try:
-                    result = train_regression_model(
-                        feature_df,
-                        current_target,
-                        model_name,
-                        None if group_col == "<none>" else group_col,
-                        exclude_cols=["estimated_cycle_life_band", "risk_model_features_used"],
-                    )
+                    result = train_regression_model(feature_df, current_target, model_name, None if group_col == "<none>" else group_col, exclude_cols=["estimated_cycle_life_band", "risk_model_features_used"])
                     st.session_state["current_model_result"] = result
                     st.success("Imbalance model trained successfully.")
                 except Exception as exc:
@@ -556,77 +468,18 @@ def main():
 
     with tabs[5]:
         st.subheader("SoH / Degradation Risk")
-        st.info(
-            "Nếu dataset không có long-term SoH/RUL label đầy đủ, app dùng proxy-based degradation risk score và relative lifetime index."
-        )
         if feature_df.empty:
             st.warning("Feature table đang rỗng.")
         else:
             c1, c2 = st.columns(2)
             if "degradation_risk_score" in feature_df.columns:
-                c1.plotly_chart(
-                    plot_risk_gauge(
-                        float(feature_df["degradation_risk_score"].mean()),
-                        "Average module degradation risk",
-                    ),
-                    width="stretch",
-                )
+                c1.plotly_chart(plot_risk_gauge(float(feature_df["degradation_risk_score"].mean()), "Average module degradation risk"), width="stretch")
             if "relative_lifetime_index" in feature_df.columns:
-                c2.plotly_chart(
-                    plot_lifetime_index(
-                        float(feature_df["relative_lifetime_index"].mean()),
-                        "Average relative lifetime index",
-                    ),
-                    width="stretch",
-                )
-            cols = [
-                c
-                for c in [
-                    "degradation_risk_score",
-                    "relative_lifetime_index",
-                    "estimated_cycle_life_band",
-                    "risk_model_features_used",
-                ]
-                if c in feature_df.columns
-            ]
-            if cols:
-                st.dataframe(feature_df[cols].head(50), width="stretch")
-
-            if targets["soh"]:
-                soh_target = st.selectbox("SoH/RUL label", options=targets["soh"], key="soh_target")
-                soh_model_name = st.selectbox(
-                    "Model",
-                    options=["Linear Regression", "Ridge", "Random Forest", "XGBoost"],
-                    key="soh_model",
-                )
-                if st.button("Train SoH/RUL model", key="train_soh"):
-                    try:
-                        result = train_regression_model(
-                            feature_df,
-                            soh_target,
-                            soh_model_name,
-                            group_col="test_id" if "test_id" in feature_df.columns else None,
-                            exclude_cols=["estimated_cycle_life_band", "risk_model_features_used"],
-                        )
-                        st.session_state["soh_model_result"] = result
-                        st.success("SoH/RUL model trained successfully.")
-                    except Exception as exc:
-                        st.error(str(exc))
-
-                result = st.session_state.get("soh_model_result")
-                if result is not None:
-                    display_model_metrics(result.metrics, result.cv_scores)
-                    fig = plot_actual_vs_predicted(result.predictions_df, f"Actual vs Predicted: {soh_target}")
-                    if fig is not None:
-                        st.plotly_chart(fig, width="stretch")
+                c2.plotly_chart(plot_lifetime_index(float(feature_df["relative_lifetime_index"].mean()), "Average relative lifetime index"), width="stretch")
 
     with tabs[6]:
         st.subheader("Explainability")
-        choice = st.selectbox(
-            "Choose trained model",
-            options=["current_model_result", "thermal_model_result", "soh_model_result"],
-            key="explain_choice",
-        )
+        choice = st.selectbox("Choose trained model", options=["current_model_result", "thermal_model_result", "soh_model_result"], key="explain_choice")
         result = st.session_state.get(choice)
         if result is None:
             st.warning("Hãy train ít nhất một model trước.")
@@ -636,35 +489,6 @@ def main():
                 st.plotly_chart(fig, width="stretch")
             st.text(auto_explanation_text(result.feature_importance_df, choice))
             st.code(summarize_feature_effects(result.feature_importance_df), language="text")
-            if st.checkbox("Compute SHAP", value=False):
-                try:
-                    shap_input = feature_df.drop(
-                        columns=[
-                            c
-                            for c in [
-                                "degradation_risk_score",
-                                "relative_lifetime_index",
-                                "estimated_cycle_life_band",
-                                "risk_model_features_used",
-                            ]
-                            if c in feature_df.columns
-                        ],
-                        errors="ignore",
-                    )
-                    artifacts = compute_shap_artifacts(result.pipeline, shap_input)
-                    summary_fig = make_shap_summary_figure(artifacts)
-                    if summary_fig is not None:
-                        st.pyplot(summary_fig, clear_figure=True)
-                    if artifacts.feature_names:
-                        feat = st.selectbox("SHAP/PDP feature", options=artifacts.feature_names, key="shap_feature")
-                        dep = make_shap_dependence_figure(artifacts, feat)
-                        if dep is not None:
-                            st.pyplot(dep, clear_figure=True)
-                        pdp = make_pdp_figure(result.pipeline, shap_input, feat)
-                        if pdp is not None:
-                            st.pyplot(pdp, clear_figure=True)
-                except Exception as exc:
-                    st.error(f"Explainability failed: {exc}")
 
     with tabs[7]:
         st.subheader("Scenario Simulator")
@@ -685,81 +509,20 @@ def main():
             scenario_df = build_risk_scores(scenario_df)
             st.dataframe(scenario_df, width="stretch")
 
-            prediction_rows = []
-            for label in ["current_model_result", "thermal_model_result"]:
-                res = st.session_state.get(label)
-                if res is None:
-                    continue
-                try:
-                    if hasattr(res.pipeline, "feature_names_in_"):
-                        x_pred = scenario_df.reindex(columns=res.pipeline.feature_names_in_, fill_value=np.nan)
-                    else:
-                        x_pred = scenario_df
-                    pred = res.pipeline.predict(x_pred)
-                    prediction_rows.append({"scenario": label, "prediction": float(np.ravel(pred)[0])})
-                except Exception:
-                    pass
-
-            if prediction_rows:
-                fig = scenario_comparison_bar(
-                    pd.DataFrame(prediction_rows), "scenario", ["prediction"], "Scenario predictions"
-                )
-                if fig is not None:
-                    st.plotly_chart(fig, width="stretch")
-
-            risk = (
-                float(scenario_df["degradation_risk_score"].iloc[0])
-                if "degradation_risk_score" in scenario_df.columns
-                else np.nan
-            )
-            life = (
-                float(scenario_df["relative_lifetime_index"].iloc[0])
-                if "relative_lifetime_index" in scenario_df.columns
-                else np.nan
-            )
-            x, y = st.columns(2)
-            if np.isfinite(risk):
-                x.plotly_chart(plot_risk_gauge(risk), width="stretch")
-            if np.isfinite(life):
-                y.plotly_chart(plot_lifetime_index(life), width="stretch")
-
             for rec in rule_based_recommendations(scenario_df.iloc[0]):
                 st.write(f"- {rec}")
 
     with tabs[8]:
         st.subheader("Export")
-        st.download_button(
-            "Download engineered features as CSV",
-            data=feature_df.to_csv(index=False).encode("utf-8"),
-            file_name="engineered_features.csv",
-            mime="text/csv",
-        )
+        st.download_button("Download engineered features as CSV", data=feature_df.to_csv(index=False).encode("utf-8"), file_name="engineered_features.csv", mime="text/csv")
         report_html = html_report(
             "Parallel Battery Analytics Report",
             {
                 "Overview": bundle.catalog.to_html(index=False),
                 "Notes": "<br>".join(prepared.notes) if prepared.notes else "No notes.",
-                "Risk": feature_df[
-                    [
-                        c
-                        for c in [
-                            "degradation_risk_score",
-                            "relative_lifetime_index",
-                            "estimated_cycle_life_band",
-                        ]
-                        if c in feature_df.columns
-                    ]
-                ]
-                .head(20)
-                .to_html(index=False),
             },
         )
-        st.download_button(
-            "Download HTML report",
-            data=report_html.encode("utf-8"),
-            file_name="parallel_battery_report.html",
-            mime="text/html",
-        )
+        st.download_button("Download HTML report", data=report_html.encode("utf-8"), file_name="parallel_battery_report.html", mime="text/html")
 
 
 if __name__ == "__main__":

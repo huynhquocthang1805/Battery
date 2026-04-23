@@ -56,10 +56,21 @@ def discover_files(input_path: str | Path) -> List[Path]:
 
 def _role_hint_from_name(file_name: str, table_name: str) -> str:
     combined = slugify(f"{file_name}_{table_name}")
-    if "char" in combined or "capacity" in combined or "hppc" in combined or "ocv" in combined:
+
+    if any(k in combined for k in ["char", "capacity", "hppc", "ocv", "multisine", "single_cell"]):
         return "characterization"
-    if "time" in combined or "module" in combined or "test" in combined or "discharge" in combined:
+
+    if "hall" in combined or "calibration" in combined:
+        return "unknown"
+
+    if table_name.lower() == "data" and (
+        file_name.lower().startswith("m1_") or file_name.lower().startswith("m2_")
+    ):
         return "timeseries"
+
+    if any(k in combined for k in ["module", "timeseries", "test", "discharge"]):
+        return "timeseries"
+
     return "unknown"
 
 
