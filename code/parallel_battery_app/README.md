@@ -245,7 +245,7 @@ Dataset parallel-module thực nghiệm kiểu này thường rất mạnh cho:
 - **thermal gradient forecasting**
 - **stress/risk estimation**
 
-Nhưng thường **không đủ long-term cycle labels** để forecast **SoH tuyệt đối** hoặc **RUL tuyệt đối** một cách nghiêm ngặt.
+Nhưng **không đủ long-term cycle labels** để forecast **SoH tuyệt đối** hoặc **RUL tuyệt đối** một cách nghiêm ngặt.
 
 Vì vậy app implement hai chế độ:
 
@@ -259,7 +259,7 @@ App sẽ dùng **proxy-based degradation risk** và **relative lifetime index**.
 
 ---
 
-## Cách thay dataset thật
+## Các bước thay dataset
 
 1. Chuẩn bị thư mục chứa file thật.
 2. Chạy app.
@@ -268,9 +268,6 @@ App sẽ dùng **proxy-based degradation risk** và **relative lifetime index**.
 5. App sẽ tự sinh feature table.
 6. Train model theo target mong muốn.
 
-Nếu dataset thật dùng tên cột khác nhiều so với giả định heuristic:
-- chỉnh file `src/utils.py` trong phần alias/regex
-- hoặc chuẩn hóa tên cột trước khi nạp vào app
 
 ---
 
@@ -281,7 +278,7 @@ Nếu dataset thật dùng tên cột khác nhiều so với giả định heuri
 - thêm **cell arrangement / regrouping optimizer**
 - thêm **uncertainty quantification**
 - thêm **group-aware benchmarking** theo điều kiện DoE
-- thêm export report PDF hoàn chỉnh
+
 
 ---
 
