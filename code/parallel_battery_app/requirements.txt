@@ -12,3 +12,4 @@ shap>=0.45.0
 xgboost>=2.0.0
 statsmodels>=0.14.0
 kaleido>=0.2.1
+networkx>=3.2.0
