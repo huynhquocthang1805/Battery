@@ -8,10 +8,7 @@ import pandas as pd
 import streamlit as st
 
 from src.data_loader import classify_tables, concat_tables, load_dataset_bundle
-from src.explainability import (
-    auto_explanation_text,
-    summarize_feature_effects,
-)
+from src.explainability import auto_explanation_text, summarize_feature_effects
 from src.feature_engineering import (
     build_feature_table_from_timeseries,
     build_risk_scores,
@@ -39,13 +36,18 @@ from src.soh_forecast import (
 from src.utils import html_report
 from src.visualization import (
     plot_actual_vs_predicted,
+    plot_cell_deviation_from_mean,
+    plot_delta_stats_bar,
     plot_feature_importance,
+    plot_imbalance_dashboard,
     plot_lifetime_index,
     plot_missing_values,
     plot_numeric_distribution,
     plot_ocv_curves,
+    plot_pairwise_delta,
     plot_residuals,
     plot_risk_gauge,
+    plot_rolling_imbalance,
     plot_timeseries,
 )
 
@@ -73,13 +75,19 @@ def cached_load_bundle(path_str: str):
 
 
 @st.cache_data(show_spinner=False)
-def cached_prepare_and_engineer(timeseries_df: pd.DataFrame, characterization_df: pd.DataFrame):
-    prepared = prepare_data(timeseries_df=timeseries_df, characterization_df=characterization_df)
+def cached_prepare_and_engineer(
+    timeseries_df: pd.DataFrame, characterization_df: pd.DataFrame
+):
+    prepared = prepare_data(
+        timeseries_df=timeseries_df, characterization_df=characterization_df
+    )
     if prepared.timeseries_df.empty:
         return prepared, pd.DataFrame()
     feature_df = build_feature_table_from_timeseries(prepared.timeseries_df)
     if not prepared.characterization_df.empty and not feature_df.empty:
-        feature_df = integrate_characterization_features(feature_df, prepared.characterization_df)
+        feature_df = integrate_characterization_features(
+            feature_df, prepared.characterization_df
+        )
     if not feature_df.empty:
         feature_df = build_risk_scores(feature_df)
     return prepared, feature_df
@@ -90,23 +98,24 @@ def ensure_session_key(key: str, default):
         st.session_state[key] = default
 
 
-def display_model_metrics(metrics: Dict[str, float], cv_scores: Optional[List[float]]) -> None:
+def display_model_metrics(
+    metrics: Dict[str, float], cv_scores: Optional[List[float]]
+) -> None:
     cols = st.columns(3)
     cols[0].metric("MAE",  f"{metrics.get('MAE',  np.nan):.4f}")
     cols[1].metric("RMSE", f"{metrics.get('RMSE', np.nan):.4f}")
     cols[2].metric("R²",   f"{metrics.get('R2',   np.nan):.4f}")
     if cv_scores:
         st.caption(
-            f"Cross-validation RMSE: mean={np.mean(cv_scores):.4f}, std={np.std(cv_scores):.4f}"
+            f"Cross-validation RMSE: "
+            f"mean={np.mean(cv_scores):.4f}, std={np.std(cv_scores):.4f}"
         )
 
 
 def get_loaded_tables_by_names(bundle, names: List[str]):
-    out = []
-    names_set = set(names)
+    out, names_set = [], set(names)
     for table in bundle.tables:
-        full_name = f"{table.source_file}::{table.table_name}"
-        if full_name in names_set:
+        if f"{table.source_file}::{table.table_name}" in names_set:
             out.append(table)
     return out
 
@@ -115,9 +124,8 @@ def filter_useful_timeseries_tables(tables):
     useful = []
     for t in tables:
         cols = {str(c).lower() for c in t.df.columns}
-        file_name  = t.source_file.lower()
-        table_name = t.table_name.lower()
-        if table_name == "data" and (file_name.startswith("m1_") or file_name.startswith("m2_")):
+        fn, tn = t.source_file.lower(), t.table_name.lower()
+        if tn == "data" and (fn.startswith("m1_") or fn.startswith("m2_")):
             useful.append(t); continue
         if {"test_time_s", "current_a", "voltage_v"} <= cols:
             useful.append(t); continue
@@ -158,9 +166,13 @@ def get_feature_targets(feature_df: pd.DataFrame) -> Dict[str, List[str]]:
     return {"current": current_targets, "thermal": thermal_targets, "soh": soh_targets}
 
 
-def build_scenario_row(feature_df: pd.DataFrame, controls: Dict[str, object]) -> pd.DataFrame:
-    skip_cols = {"degradation_risk_score", "relative_lifetime_index",
-                 "estimated_cycle_life_band", "risk_model_features_used"}
+def build_scenario_row(
+    feature_df: pd.DataFrame, controls: Dict[str, object]
+) -> pd.DataFrame:
+    skip_cols = {
+        "degradation_risk_score", "relative_lifetime_index",
+        "estimated_cycle_life_band", "risk_model_features_used",
+    }
     base: Dict[str, object] = {}
     for col in feature_df.columns:
         if col in skip_cols:
@@ -171,11 +183,11 @@ def build_scenario_row(feature_df: pd.DataFrame, controls: Dict[str, object]) ->
             mode = feature_df[col].mode(dropna=True)
             base[col] = mode.iloc[0] if not mode.empty else "unknown"
     alias_map = {
-        "operating_temperature":    ["operating_temperature", "ambient_temperature", "test_temperature"],
-        "interconnection_resistance": ["interconnection_resistance", "branch_resistance"],
-        "chemistry":                ["chemistry"],
-        "ageing":                   ["ageing", "aging"],
-        "ambient_temperature":      ["ambient_temperature", "operating_temperature"],
+        "operating_temperature":      ["operating_temperature", "ambient_temperature", "test_temperature"],
+        "interconnection_resistance":  ["interconnection_resistance", "branch_resistance"],
+        "chemistry":                   ["chemistry"],
+        "ageing":                      ["ageing", "aging"],
+        "ambient_temperature":         ["ambient_temperature", "operating_temperature"],
     }
     for key, value in controls.items():
         for col in alias_map.get(key, [key]):
@@ -195,11 +207,13 @@ def main():
         "Graph Network Analysis (GCN) · SOH Forecast & RUL · Explainability · Scenario Simulation"
     )
 
-    for key in ["current_model_result", "thermal_model_result", "soh_model_result",
-                "bundle", "bundle_error", "dataset_path"]:
+    for key in [
+        "current_model_result", "thermal_model_result", "soh_model_result",
+        "bundle", "bundle_error", "dataset_path",
+    ]:
         ensure_session_key(key, None if key != "dataset_path" else "")
 
-    # ---- Sidebar --------------------------------------------------------
+    # ------------------------------------------------------------------ sidebar
     with st.sidebar:
         st.header("Dataset Configuration")
         dataset_path = st.text_input(
@@ -216,11 +230,12 @@ def main():
             except Exception as exc:
                 st.session_state["bundle"] = None
                 st.session_state["bundle_error"] = str(exc)
-
         if st.button("Clear Cache"):
             st.cache_data.clear()
-            for k in ["bundle", "bundle_error", "current_model_result",
-                      "thermal_model_result", "soh_model_result"]:
+            for k in [
+                "bundle", "bundle_error", "current_model_result",
+                "thermal_model_result", "soh_model_result",
+            ]:
                 st.session_state.pop(k, None)
             st.rerun()
 
@@ -232,9 +247,8 @@ def main():
     if bundle is None:
         st.info("Nhập dataset path ở sidebar và bấm **Load dataset** để bắt đầu.")
         return
-
     if bundle.catalog.empty:
-        st.error("Không tìm thấy bảng dữ liệu hợp lệ trong path đã cung cấp.")
+        st.error("Không tìm thấy bảng dữ liệu hợp lệ.")
         if bundle.errors:
             st.write(bundle.errors)
         return
@@ -254,19 +268,27 @@ def main():
 
     with st.sidebar:
         st.subheader("Table Selection")
-        use_all_ts   = st.checkbox("Use all detected timeseries tables",       value=True)
-        use_all_char = st.checkbox("Use all detected characterization tables",  value=True)
-        selected_ts_names   = ts_options   if use_all_ts   else st.multiselect("Timeseries tables",       ts_options,   ts_options[:min(10, len(ts_options))])
-        selected_char_names = char_options if use_all_char else st.multiselect("Characterization tables", char_options, char_options[:min(10, len(char_options))])
+        use_all_ts   = st.checkbox("Use all detected timeseries tables",      value=True)
+        use_all_char = st.checkbox("Use all detected characterization tables", value=True)
+        selected_ts_names = (
+            ts_options if use_all_ts
+            else st.multiselect("Timeseries tables", ts_options, ts_options[: min(10, len(ts_options))])
+        )
+        selected_char_names = (
+            char_options if use_all_char
+            else st.multiselect("Characterization tables", char_options, char_options[: min(10, len(char_options))])
+        )
 
-    timeseries_tables      = get_loaded_tables_by_names(bundle, selected_ts_names)
+    timeseries_tables       = get_loaded_tables_by_names(bundle, selected_ts_names)
     characterization_tables = get_loaded_tables_by_names(bundle, selected_char_names)
-    timeseries_df          = concat_tables(timeseries_tables,      add_source_cols=True)
-    characterization_df    = concat_tables(characterization_tables, add_source_cols=True)
+    timeseries_df           = concat_tables(timeseries_tables,       add_source_cols=True)
+    characterization_df     = concat_tables(characterization_tables, add_source_cols=True)
 
     try:
         with st.spinner("Đang tiền xử lý và sinh feature..."):
-            prepared, feature_df = cached_prepare_and_engineer(timeseries_df, characterization_df)
+            prepared, feature_df = cached_prepare_and_engineer(
+                timeseries_df, characterization_df
+            )
     except Exception as exc:
         st.error(f"Lỗi preprocessing / feature engineering: {exc}")
         st.stop()
@@ -274,9 +296,9 @@ def main():
     targets = get_feature_targets(feature_df)
     schema  = prepared.schema_timeseries
 
-    # ====================================================================
+    # ================================================================
     # TABS
-    # ====================================================================
+    # ================================================================
     tabs = st.tabs([
         "📋 Overview",
         "🔬 Cell Characterization",
@@ -284,14 +306,14 @@ def main():
         "🌡️ Forecast Thermal",
         "📈 Forecast Imbalance",
         "🩺 SoH / Risk",
-        "📡 Graph Network Analysis",       # NEW
-        "🔮 SOH Forecast & RUL",            # NEW
+        "📡 Graph Network Analysis",
+        "🔮 SOH Forecast & RUL",
         "🔍 Explainability",
         "🎯 Scenario Simulator",
         "📤 Export",
     ])
 
-    # ------------------------------------------------------------------ 0
+    # ---------------------------------------------------------------- 0
     with tabs[0]:
         st.subheader("Dataset Overview")
         c1, c2, c3, c4 = st.columns(4)
@@ -308,56 +330,194 @@ def main():
         st.markdown("**Preview timeseries**")
         st.dataframe(prepared.timeseries_df.head(20), use_container_width=True)
         with st.expander("Debug summary"):
-            st.write("Timeseries shape:",      prepared.timeseries_df.shape)
+            st.write("Timeseries shape:",       prepared.timeseries_df.shape)
             st.write("Characterization shape:", prepared.characterization_df.shape)
             st.write("Feature shape:",          feature_df.shape)
             st.write("Feature columns:",        feature_df.columns.tolist())
         fig = plot_missing_values(prepared.timeseries_df)
-        if fig is not None:
+        if fig:
             st.plotly_chart(fig, use_container_width=True)
 
-    # ------------------------------------------------------------------ 1
+    # ---------------------------------------------------------------- 1
     with tabs[1]:
         st.subheader("Cell Characterization")
         if prepared.characterization_df.empty:
             st.warning("Chưa có characterization table.")
         else:
-            numeric_cols     = prepared.characterization_df.select_dtypes(include=[np.number]).columns.tolist()
-            capacity_cols    = [c for c in numeric_cols if "capacity" in c]
-            resistance_cols  = [c for c in numeric_cols if any(k in c for k in ["resistance", "r0", "ohmic"])]
-            ocv_cols         = [c for c in numeric_cols if "ocv" in c]
-            color_candidates = [c for c in ["ageing", "chemistry"] if c in prepared.characterization_df.columns]
-            color_col = st.selectbox("Color by", ["<none>"] + color_candidates, key="char_color")
-            color_col = None if color_col == "<none>" else color_col
-            if capacity_cols:
-                st.plotly_chart(plot_numeric_distribution(prepared.characterization_df, capacity_cols[0], color=color_col, title="Capacity distribution"), use_container_width=True)
-            if resistance_cols:
-                st.plotly_chart(plot_numeric_distribution(prepared.characterization_df, resistance_cols[0], color=color_col, title="Resistance distribution"), use_container_width=True)
+            num_cols     = prepared.characterization_df.select_dtypes(include=[np.number]).columns.tolist()
+            cap_cols     = [c for c in num_cols if "capacity" in c]
+            res_cols     = [c for c in num_cols if any(k in c for k in ["resistance", "r0", "ohmic"])]
+            ocv_cols     = [c for c in num_cols if "ocv" in c]
+            color_cands  = [c for c in ["ageing", "chemistry"] if c in prepared.characterization_df.columns]
+            color_col    = st.selectbox("Color by", ["<none>"] + color_cands, key="char_color")
+            color_col    = None if color_col == "<none>" else color_col
+            if cap_cols:
+                st.plotly_chart(plot_numeric_distribution(prepared.characterization_df, cap_cols[0], color=color_col, title="Capacity distribution"), use_container_width=True)
+            if res_cols:
+                st.plotly_chart(plot_numeric_distribution(prepared.characterization_df, res_cols[0], color=color_col, title="Resistance distribution"), use_container_width=True)
             if ocv_cols:
                 x_cands = [c for c in prepared.characterization_df.columns if c not in ocv_cols][:5]
                 if x_cands:
                     st.plotly_chart(plot_ocv_curves(prepared.characterization_df.head(500), x_cands[0], ocv_cols[:6]), use_container_width=True)
             st.dataframe(prepared.characterization_df.head(50), use_container_width=True)
 
-    # ------------------------------------------------------------------ 2
+    # ================================================================ 2  UPDATED
     with tabs[2]:
         st.subheader("Current Imbalance Analysis")
-        if prepared.timeseries_df.empty:
-            st.warning("Không có timeseries để phân tích.")
+
+        if prepared.timeseries_df.empty or schema is None or not schema.cell_current_cols:
+            st.warning("Không có timeseries hoặc không tìm thấy cột dòng điện riêng từng cell.")
         else:
-            grp_candidates = [c for c in ["test_id", "module_id", "source_file", "source_table", "synthetic_test_id"] if c in prepared.timeseries_df.columns]
+            # --- select test case ---
+            grp_cands = [
+                c for c in ["test_id", "module_id", "source_file", "source_table", "synthetic_test_id"]
+                if c in prepared.timeseries_df.columns
+            ]
             case_df = prepared.timeseries_df.copy()
-            if grp_candidates:
-                sel_col = grp_candidates[0]
+            if grp_cands:
+                sel_col = grp_cands[0]
                 vals    = case_df[sel_col].astype(str).unique().tolist()
                 sel_val = st.selectbox("Select test condition", vals, key="analysis_case")
                 case_df = case_df[case_df[sel_col].astype(str) == sel_val].copy()
-            if schema and schema.time_col and schema.cell_current_cols:
-                st.plotly_chart(plot_timeseries(case_df, schema.time_col, schema.cell_current_cols, "Current time-series per cell"), use_container_width=True)
-                if schema.cell_temp_cols:
-                    st.plotly_chart(plot_timeseries(case_df, schema.time_col, schema.cell_temp_cols, "Temperature time-series per cell"), use_container_width=True)
 
-    # ------------------------------------------------------------------ 3
+            # --- controls ---
+            st.markdown("#### Delta visualisation controls")
+            col_ka, col_kb, col_kc = st.columns(3)
+            k_current = col_ka.number_input(
+                "Scale factor k (current)", min_value=0.01, max_value=1000.0,
+                value=1.0, step=0.1, format="%.3f", key="k_current",
+                help="Delta_ij × k  — increase to amplify small differences",
+            )
+            k_thermal = col_kb.number_input(
+                "Scale factor k (thermal)", min_value=0.01, max_value=1000.0,
+                value=1.0, step=0.1, format="%.3f", key="k_thermal",
+            )
+            roll_win = col_kc.number_input(
+                "Rolling window (samples)", min_value=2, max_value=5000,
+                value=50, step=10, key="roll_win",
+            )
+            show_abs = st.toggle("Show |delta| (absolute values) for pairwise plot", value=True, key="show_abs")
+
+            # ── Current plots ──────────────────────────────────────────
+            st.markdown("---")
+            st.markdown("### Current (dòng điện)")
+
+            # 1. Raw signals
+            st.plotly_chart(
+                plot_timeseries(case_df, schema.time_col, schema.cell_current_cols,
+                                "Raw current per cell  [A]"),
+                use_container_width=True,
+            )
+
+            # 2. Deviation from mean
+            st.plotly_chart(
+                plot_cell_deviation_from_mean(
+                    case_df, schema.time_col, schema.cell_current_cols,
+                    title=f"Current deviation from module mean  × {k_current:.3g}  [A]",
+                    scale_factor=k_current, unit_label="A",
+                ),
+                use_container_width=True,
+            )
+
+            # 3. Pairwise delta
+            st.plotly_chart(
+                plot_pairwise_delta(
+                    case_df, schema.time_col, schema.cell_current_cols,
+                    title=f"Pairwise current delta  × {k_current:.3g}  [A]",
+                    scale_factor=k_current, unit_label="A", show_abs=show_abs,
+                ),
+                use_container_width=True,
+            )
+
+            # 4. Rolling imbalance
+            st.plotly_chart(
+                plot_rolling_imbalance(
+                    case_df, schema.time_col, schema.cell_current_cols,
+                    window=int(roll_win),
+                    title=f"Rolling current imbalance index  × {k_current:.3g}  [A]",
+                    scale_factor=k_current, unit_label="A",
+                ),
+                use_container_width=True,
+            )
+
+            # 5. Summary bar
+            st.plotly_chart(
+                plot_delta_stats_bar(
+                    case_df, schema.cell_current_cols,
+                    scale_factor=k_current, unit_label="A",
+                ),
+                use_container_width=True,
+            )
+
+            # 6. Full dashboard (4-panel)
+            with st.expander("📊 Full imbalance dashboard (4-panel view)", expanded=False):
+                st.plotly_chart(
+                    plot_imbalance_dashboard(
+                        case_df, schema.time_col, schema.cell_current_cols,
+                        scale_factor=k_current, window=int(roll_win),
+                        unit_label="A", main_title="Current Imbalance Dashboard",
+                    ),
+                    use_container_width=True,
+                )
+
+            # ── Thermal plots ──────────────────────────────────────────
+            if schema.cell_temp_cols:
+                st.markdown("---")
+                st.markdown("### Temperature (nhiệt độ)")
+
+                st.plotly_chart(
+                    plot_timeseries(case_df, schema.time_col, schema.cell_temp_cols,
+                                    "Raw temperature per cell  [°C]"),
+                    use_container_width=True,
+                )
+
+                st.plotly_chart(
+                    plot_cell_deviation_from_mean(
+                        case_df, schema.time_col, schema.cell_temp_cols,
+                        title=f"Temperature deviation from mean  × {k_thermal:.3g}  [°C]",
+                        scale_factor=k_thermal, unit_label="°C",
+                    ),
+                    use_container_width=True,
+                )
+
+                st.plotly_chart(
+                    plot_pairwise_delta(
+                        case_df, schema.time_col, schema.cell_temp_cols,
+                        title=f"Pairwise temperature delta  × {k_thermal:.3g}  [°C]",
+                        scale_factor=k_thermal, unit_label="°C", show_abs=show_abs,
+                    ),
+                    use_container_width=True,
+                )
+
+                st.plotly_chart(
+                    plot_rolling_imbalance(
+                        case_df, schema.time_col, schema.cell_temp_cols,
+                        window=int(roll_win),
+                        title=f"Rolling thermal imbalance index  × {k_thermal:.3g}  [°C]",
+                        scale_factor=k_thermal, unit_label="°C",
+                    ),
+                    use_container_width=True,
+                )
+
+                st.plotly_chart(
+                    plot_delta_stats_bar(
+                        case_df, schema.cell_temp_cols,
+                        scale_factor=k_thermal, unit_label="°C",
+                    ),
+                    use_container_width=True,
+                )
+
+                with st.expander("🌡️ Full thermal dashboard (4-panel view)", expanded=False):
+                    st.plotly_chart(
+                        plot_imbalance_dashboard(
+                            case_df, schema.time_col, schema.cell_temp_cols,
+                            scale_factor=k_thermal, window=int(roll_win),
+                            unit_label="°C", main_title="Thermal Imbalance Dashboard",
+                        ),
+                        use_container_width=True,
+                    )
+
+    # ---------------------------------------------------------------- 3
     with tabs[3]:
         st.subheader("Forecast Temperature / Thermal Factors")
         if feature_df.empty:
@@ -371,7 +531,11 @@ def main():
             th_grp   = st.selectbox("Group column", ["<none>"] + [c for c in ["test_id", "module_id", "source_file"] if c in feature_df.columns], key="thermal_group")
             if st.button("Train thermal model", key="train_thermal"):
                 try:
-                    res = train_regression_model(feature_df, th_tgt, th_model, None if th_grp == "<none>" else th_grp, exclude_cols=["estimated_cycle_life_band", "risk_model_features_used"])
+                    res = train_regression_model(
+                        feature_df, th_tgt, th_model,
+                        None if th_grp == "<none>" else th_grp,
+                        exclude_cols=["estimated_cycle_life_band", "risk_model_features_used"],
+                    )
                     st.session_state["thermal_model_result"] = res
                     st.success("Thermal model trained.")
                 except Exception as exc:
@@ -379,12 +543,15 @@ def main():
             result: ModelingResult | None = st.session_state.get("thermal_model_result")
             if result:
                 display_model_metrics(result.metrics, result.cv_scores)
-                for fig in [plot_actual_vs_predicted(result.predictions_df, f"Actual vs Predicted: {th_tgt}"),
-                            plot_residuals(result.predictions_df, f"Residuals: {th_tgt}"),
-                            plot_feature_importance(result.feature_importance_df, f"Feature importance: {th_tgt}")]:
-                    if fig: st.plotly_chart(fig, use_container_width=True)
+                for fig in [
+                    plot_actual_vs_predicted(result.predictions_df, f"Actual vs Predicted: {th_tgt}"),
+                    plot_residuals(result.predictions_df,           f"Residuals: {th_tgt}"),
+                    plot_feature_importance(result.feature_importance_df, f"Feature importance: {th_tgt}"),
+                ]:
+                    if fig:
+                        st.plotly_chart(fig, use_container_width=True)
 
-    # ------------------------------------------------------------------ 4
+    # ---------------------------------------------------------------- 4
     with tabs[4]:
         st.subheader("Forecast Current Imbalance")
         if feature_df.empty:
@@ -398,7 +565,11 @@ def main():
             cur_grp   = st.selectbox("Group column", ["<none>"] + [c for c in ["test_id", "module_id", "source_file"] if c in feature_df.columns], key="current_group")
             if st.button("Train imbalance model", key="train_current"):
                 try:
-                    res = train_regression_model(feature_df, cur_tgt, cur_model, None if cur_grp == "<none>" else cur_grp, exclude_cols=["estimated_cycle_life_band", "risk_model_features_used"])
+                    res = train_regression_model(
+                        feature_df, cur_tgt, cur_model,
+                        None if cur_grp == "<none>" else cur_grp,
+                        exclude_cols=["estimated_cycle_life_band", "risk_model_features_used"],
+                    )
                     st.session_state["current_model_result"] = res
                     st.success("Imbalance model trained.")
                 except Exception as exc:
@@ -406,16 +577,19 @@ def main():
             result = st.session_state.get("current_model_result")
             if result:
                 display_model_metrics(result.metrics, result.cv_scores)
-                for fig in [plot_actual_vs_predicted(result.predictions_df, f"Actual vs Predicted: {cur_tgt}"),
-                            plot_residuals(result.predictions_df, f"Residuals: {cur_tgt}"),
-                            plot_feature_importance(result.feature_importance_df, f"Feature importance: {cur_tgt}")]:
-                    if fig: st.plotly_chart(fig, use_container_width=True)
+                for fig in [
+                    plot_actual_vs_predicted(result.predictions_df, f"Actual vs Predicted: {cur_tgt}"),
+                    plot_residuals(result.predictions_df,           f"Residuals: {cur_tgt}"),
+                    plot_feature_importance(result.feature_importance_df, f"Feature importance: {cur_tgt}"),
+                ]:
+                    if fig:
+                        st.plotly_chart(fig, use_container_width=True)
                 if st.button("Save current model", key="save_current_model"):
                     mp = Path("saved_model_current.joblib")
                     save_model(result.pipeline, mp)
                     st.success(f"Saved to {mp.resolve()}")
 
-    # ------------------------------------------------------------------ 5
+    # ---------------------------------------------------------------- 5
     with tabs[5]:
         st.subheader("SoH / Degradation Risk")
         if feature_df.empty:
@@ -427,215 +601,132 @@ def main():
             if "relative_lifetime_index" in feature_df.columns:
                 c2.plotly_chart(plot_lifetime_index(float(feature_df["relative_lifetime_index"].mean()), "Average relative lifetime index"), use_container_width=True)
 
-    # ================================================================== 6  NEW
+    # ---------------------------------------------------------------- 6
     with tabs[6]:
         st.subheader("📡 Graph Network Analysis — 4 Cells as Graph Nodes")
         st.markdown(
-            "Mỗi **cell** là một **node**. Các **cạnh** (edges) được trọng số hóa "
-            "bằng tổ hợp **ΔI** (dòng điện), **ΔT** (nhiệt độ) và **ΔSOC** giữa các cặp pin. "
-            "GCN message-passing tổng hợp đặc trưng hàng xóm vào mỗi node."
+            "Mỗi **cell** là một **node**. Cạnh được trọng số hoá bằng "
+            "**ΔI** · **ΔT** · **ΔSOC**. GCN message-passing tổng hợp đặc trưng hàng xóm."
         )
-
         if prepared.timeseries_df.empty or schema is None or not schema.cell_current_cols:
-            st.warning("Cần có dữ liệu time-series với ít nhất các cột dòng điện riêng từng cell.")
+            st.warning("Cần time-series với cột dòng điện riêng từng cell.")
         else:
-            # --- Select test case ----------------------------------------
-            grp_candidates = [c for c in ["test_id", "module_id", "source_file", "source_table", "synthetic_test_id"]
-                              if c in prepared.timeseries_df.columns]
-            graph_df = prepared.timeseries_df.copy()
-            if grp_candidates:
-                sel_col = grp_candidates[0]
-                vals    = graph_df[sel_col].astype(str).unique().tolist()
-                sel_val = st.selectbox("Select test condition for graph", vals, key="graph_case")
-                graph_df = graph_df[graph_df[sel_col].astype(str) == sel_val].copy()
-
-            # --- Hyperparameters -----------------------------------------
-            col_a, col_b, col_c = st.columns(3)
-            alpha_i   = col_a.slider("α current (ΔI weight)",   0.0, 1.0, 0.50, 0.05, key="g_ai")
-            alpha_t   = col_b.slider("α thermal (ΔT weight)",   0.0, 1.0, 0.30, 0.05, key="g_at")
-            alpha_soc = col_c.slider("α SOC (ΔSOC weight)",     0.0, 1.0, 0.20, 0.05, key="g_as")
-            n_iter    = st.slider("GCN message-passing iterations", 1, 5, 2, key="gcn_iter")
-
-            with st.spinner("Đang xây dựng đồ thị pin..."):
+            grp_cands = [c for c in ["test_id", "module_id", "source_file", "source_table", "synthetic_test_id"] if c in prepared.timeseries_df.columns]
+            graph_df  = prepared.timeseries_df.copy()
+            if grp_cands:
+                sc = grp_cands[0]
+                sv = st.selectbox("Test condition (graph)", graph_df[sc].astype(str).unique().tolist(), key="graph_case")
+                graph_df = graph_df[graph_df[sc].astype(str) == sv].copy()
+            ca, cb, cc = st.columns(3)
+            ai  = ca.slider("α current", 0.0, 1.0, 0.50, 0.05, key="g_ai")
+            at  = cb.slider("α thermal", 0.0, 1.0, 0.30, 0.05, key="g_at")
+            as_ = cc.slider("α SOC",     0.0, 1.0, 0.20, 0.05, key="g_as")
+            ni  = st.slider("GCN iterations", 1, 5, 2, key="gcn_iter")
+            with st.spinner("Building graph..."):
                 try:
-                    adj, node_feat, labels = build_battery_graph(
+                    adj, nf, labels = build_battery_graph(
                         graph_df,
                         cell_current_cols=schema.cell_current_cols,
                         cell_temp_cols=schema.cell_temp_cols or [],
                         time_col=schema.time_col,
-                        alpha_current=alpha_i,
-                        alpha_thermal=alpha_t,
-                        alpha_soc=alpha_soc,
+                        alpha_current=ai, alpha_thermal=at, alpha_soc=as_,
                     )
-                    node_feat_gcn = message_passing_aggregate(adj, node_feat, n_iter=n_iter)
-                    graph_metrics = compute_graph_metrics(adj, labels)
+                    nf_gcn = message_passing_aggregate(adj, nf, n_iter=ni)
+                    gm     = compute_graph_metrics(adj, labels)
                 except Exception as exc:
-                    st.error(f"Graph build error: {exc}")
-                    st.stop()
+                    st.error(f"Graph build error: {exc}"); st.stop()
+            st.markdown("#### Node Metrics")
+            st.dataframe(gm.set_index("node").style.format("{:.4f}"), use_container_width=True)
+            fv = gm["fiedler_value"].iloc[0] if not gm.empty else 0.0
+            st.caption(f"Fiedler value: {fv:.4f} — higher = tighter coupling")
+            for fig, hdr in [
+                (plot_battery_graph(adj, nf, labels, gm), "#### Network Graph"),
+                (plot_adjacency_heatmap(adj, labels),     "#### Coupling Similarity Matrix"),
+                (plot_gcn_features(nf, nf_gcn, labels),  "#### Raw vs GCN-Aggregated Features"),
+            ]:
+                if fig:
+                    st.markdown(hdr)
+                    st.plotly_chart(fig, use_container_width=True)
 
-            # --- Graph metrics table -------------------------------------
-            st.markdown("#### Graph Node Metrics")
-            st.dataframe(graph_metrics.set_index("node").style.format("{:.4f}"), use_container_width=True)
-
-            fiedler = graph_metrics["fiedler_value"].iloc[0] if not graph_metrics.empty else 0.0
-            st.caption(
-                f"**Fiedler value (algebraic connectivity):** {fiedler:.4f} — "
-                "giá trị cao hơn → mạng pin kết nối chặt chẽ hơn, "
-                "suy hao lan truyền nhanh hơn."
-            )
-
-            # --- Network graph -------------------------------------------
-            st.markdown("#### Battery Module Network Graph")
-            fig_graph = plot_battery_graph(adj, node_feat, labels, graph_metrics)
-            if fig_graph:
-                st.plotly_chart(fig_graph, use_container_width=True)
-
-            # --- Adjacency heatmap ---------------------------------------
-            st.markdown("#### Cell-to-Cell Coupling Similarity")
-            fig_heat = plot_adjacency_heatmap(adj, labels)
-            if fig_heat:
-                st.plotly_chart(fig_heat, use_container_width=True)
-
-            # --- GCN features comparison ---------------------------------
-            st.markdown("#### Raw vs GCN-Aggregated Node Features")
-            fig_gcn = plot_gcn_features(node_feat, node_feat_gcn, labels)
-            if fig_gcn:
-                st.plotly_chart(fig_gcn, use_container_width=True)
-
-            st.info(
-                "💡 **Diễn giải:** Node có **Degradation Propagation Risk** cao "
-                "là cell có xu hướng bị suy hao và kéo theo các cell lân cận. "
-                "Sau GCN aggregation, đặc trưng node đã tổng hợp thêm thông tin "
-                "từ các hàng xóm — đây là đầu vào phong phú hơn cho mô hình SOH."
-            )
-
-    # ================================================================== 7  NEW
+    # ---------------------------------------------------------------- 7
     with tabs[7]:
         st.subheader("🔮 SOH Forecast & Remaining Useful Life (RUL)")
-        st.markdown(
-            "SOH được ước lượng theo từng **cycle** từ dung lượng phóng Coulomb-counted. "
-            "Forecast sử dụng **ensemble** (Linear + Polynomial + Exponential Decay). "
-            "RUL = số cycle đến khi SOH < ngưỡng EOL."
-        )
-
         if prepared.timeseries_df.empty or schema is None or not schema.cell_current_cols:
             st.warning("Cần time-series với cột dòng điện riêng từng cell.")
         else:
-            # --- Controls ------------------------------------------------
             col1, col2, col3 = st.columns(3)
-            soh_threshold = col1.slider("EOL threshold (%)", 60.0, 90.0, 80.0, 1.0, key="rul_thr")
-            horizon       = col2.slider("Forecast horizon (cycles)", 10, 500, 100, 10, key="rul_horizon")
-            method        = col3.selectbox("Forecast method", ["ensemble", "linear", "polynomial"], key="rul_method")
-            nominal_cap   = st.number_input("Nominal capacity (Ah) — 0 = auto-detect", 0.0, 1000.0, 0.0, 0.1, key="nominal_cap")
-            nominal_cap_val = nominal_cap if nominal_cap > 0 else None
-
-            # --- Select test case ----------------------------------------
-            grp_candidates = [c for c in ["test_id", "module_id", "source_file", "source_table", "synthetic_test_id"]
-                              if c in prepared.timeseries_df.columns]
-            soh_df_raw = prepared.timeseries_df.copy()
-            if grp_candidates:
-                sel_col = grp_candidates[0]
-                vals    = soh_df_raw[sel_col].astype(str).unique().tolist()
-                sel_val = st.selectbox("Select test condition for SOH", vals, key="soh_case")
-                soh_df_raw = soh_df_raw[soh_df_raw[sel_col].astype(str) == sel_val].copy()
-
+            soh_thr = col1.slider("EOL threshold (%)", 60.0, 90.0, 80.0, 1.0, key="rul_thr")
+            horizon = col2.slider("Forecast horizon (cycles)", 10, 500, 100, 10, key="rul_horizon")
+            method  = col3.selectbox("Forecast method", ["ensemble", "linear", "polynomial"], key="rul_method")
+            nom_cap = st.number_input("Nominal capacity (Ah) — 0 = auto", 0.0, 1000.0, 0.0, 0.1, key="nominal_cap")
+            nom_cap_val = nom_cap if nom_cap > 0 else None
+            grp_cands = [c for c in ["test_id", "module_id", "source_file", "source_table", "synthetic_test_id"] if c in prepared.timeseries_df.columns]
+            soh_raw = prepared.timeseries_df.copy()
+            if grp_cands:
+                sc = grp_cands[0]
+                sv = st.selectbox("Test condition (SOH)", soh_raw[sc].astype(str).unique().tolist(), key="soh_case")
+                soh_raw = soh_raw[soh_raw[sc].astype(str) == sv].copy()
             if st.button("Compute SOH & Forecast", key="run_soh"):
-                with st.spinner("Đang ước lượng SOH từng cycle..."):
+                with st.spinner("Estimating SOH per cycle..."):
                     try:
-                        cycle_col_cand = next((c for c in ["cycle", "cycle_number", "cycle_id"] if c in soh_df_raw.columns), None)
-                        soh_hist = estimate_soh_per_cycle(
-                            soh_df_raw,
-                            cell_current_cols=schema.cell_current_cols,
-                            time_col=schema.time_col,
-                            cycle_col=cycle_col_cand,
-                            nominal_capacity_ah=nominal_cap_val,
-                        )
-                        st.session_state["soh_hist"] = soh_hist
+                        cyc_col = next((c for c in ["cycle", "cycle_number", "cycle_id"] if c in soh_raw.columns), None)
+                        soh_h   = estimate_soh_per_cycle(soh_raw, schema.cell_current_cols, schema.time_col, cyc_col, nom_cap_val)
+                        st.session_state["soh_hist"] = soh_h
                     except Exception as exc:
-                        st.error(f"SOH estimation error: {exc}")
-                        st.stop()
-
-                with st.spinner("Đang forecast SOH..."):
+                        st.error(f"SOH error: {exc}"); st.stop()
+                with st.spinner("Forecasting..."):
                     try:
-                        soh_fc = forecast_soh(soh_hist, target_col="soh_mean", horizon=horizon, method=method)
-                        rul    = estimate_rul(soh_hist, soh_fc, target_col="soh_mean", threshold=soh_threshold)
+                        soh_fc = forecast_soh(soh_h, "soh_mean", horizon, method)
+                        rul    = estimate_rul(soh_h, soh_fc, "soh_mean", soh_thr)
                         st.session_state["soh_forecast"] = soh_fc
                         st.session_state["rul_info"]     = rul
                     except Exception as exc:
-                        st.error(f"Forecast error: {exc}")
-                        st.stop()
-
-            soh_hist = st.session_state.get("soh_hist")
-            soh_fc   = st.session_state.get("soh_forecast")
-            rul_info = st.session_state.get("rul_info")
-
-            if soh_hist is not None:
-                # RUL gauge + metrics
+                        st.error(f"Forecast error: {exc}"); st.stop()
+            soh_h  = st.session_state.get("soh_hist")
+            soh_fc = st.session_state.get("soh_forecast")
+            rul    = st.session_state.get("rul_info")
+            if soh_h is not None:
                 g1, g2, g3, g4 = st.columns(4)
-                cur_soh = rul_info.get("current_soh", np.nan) if rul_info else np.nan
-                eol_cyc = rul_info.get("eol_cycle")          if rul_info else None
-                rul_cyc = rul_info.get("rul_cycles")          if rul_info else None
-                g1.metric("Current SOH", f"{cur_soh:.1f} %" if not np.isnan(cur_soh) else "N/A")
-                g2.metric("Cycles observed", f"{int(soh_hist['cycle'].max())}" if not soh_hist.empty else "0")
-                g3.metric("Predicted EOL cycle", f"Cycle {eol_cyc}" if eol_cyc else "Beyond horizon")
-                g4.metric("RUL (cycles)", f"{int(rul_cyc)}" if rul_cyc is not None else "—")
-
-                if rul_info:
-                    fig_gauge = plot_rul_gauge(rul_info)
-                    if fig_gauge:
-                        st.plotly_chart(fig_gauge, use_container_width=True)
-
-                # Main forecast chart
-                fig_fc = plot_soh_forecast(
-                    soh_hist, soh_fc or pd.DataFrame(),
-                    cell_cols=schema.cell_current_cols,
-                    target_col="soh_mean",
-                    rul_info=rul_info,
-                )
-                if fig_fc:
-                    st.plotly_chart(fig_fc, use_container_width=True)
-
-                # SOH spread boxplot
-                fig_box = plot_soh_spread(soh_hist, schema.cell_current_cols)
-                if fig_box:
-                    st.plotly_chart(fig_box, use_container_width=True)
-
-                # Per-cycle table
+                cs   = rul.get("current_soh", np.nan) if rul else np.nan
+                eolc = rul.get("eol_cycle")            if rul else None
+                rulc = rul.get("rul_cycles")           if rul else None
+                g1.metric("Current SOH",        f"{cs:.1f} %" if not np.isnan(cs) else "N/A")
+                g2.metric("Cycles observed",    f"{int(soh_h['cycle'].max())}" if not soh_h.empty else "0")
+                g3.metric("Predicted EOL",      f"Cycle {eolc}" if eolc else "Beyond horizon")
+                g4.metric("RUL (cycles)",       f"{int(rulc)}" if rulc is not None else "—")
+                if rul:
+                    fg = plot_rul_gauge(rul)
+                    if fg: st.plotly_chart(fg, use_container_width=True)
+                ff = plot_soh_forecast(soh_h, soh_fc or pd.DataFrame(), schema.cell_current_cols, "soh_mean", rul)
+                if ff: st.plotly_chart(ff, use_container_width=True)
+                fb = plot_soh_spread(soh_h, schema.cell_current_cols)
+                if fb: st.plotly_chart(fb, use_container_width=True)
                 with st.expander("Per-cycle SOH table"):
-                    st.dataframe(soh_hist, use_container_width=True)
-
-                # Download
+                    st.dataframe(soh_h, use_container_width=True)
                 if soh_fc is not None and not soh_fc.empty:
-                    combined = pd.concat([soh_hist.assign(type="historical"),
-                                          soh_fc.rename(columns={"soh_forecast": "soh_mean"}).assign(type="forecast")],
-                                         ignore_index=True)
-                    st.download_button(
-                        "⬇ Download SOH + Forecast CSV",
-                        data=combined.to_csv(index=False).encode("utf-8"),
-                        file_name="soh_forecast.csv", mime="text/csv",
-                    )
-
-                # Train ML model on SOH (optional)
+                    comb = pd.concat([
+                        soh_h.assign(type="historical"),
+                        soh_fc.rename(columns={"soh_forecast": "soh_mean"}).assign(type="forecast"),
+                    ], ignore_index=True)
+                    st.download_button("⬇ Download SOH + Forecast CSV", comb.to_csv(index=False).encode(), "soh_forecast.csv", "text/csv")
                 st.markdown("---")
                 st.markdown("#### Train ML Model on SOH History")
-                if len(soh_hist) >= 5:
-                    soh_ml_model = st.selectbox("Model", ["Linear Regression", "Ridge", "Random Forest", "XGBoost"], key="soh_ml_model")
+                if len(soh_h) >= 5:
+                    sml = st.selectbox("Model", ["Linear Regression", "Ridge", "Random Forest", "XGBoost"], key="soh_ml_model")
                     if st.button("Train SOH regression model", key="train_soh"):
                         try:
-                            soh_feat = soh_hist.copy()
-                            # Add lag features
-                            soh_feat["soh_lag1"]  = soh_feat["soh_mean"].shift(1)
-                            soh_feat["soh_lag2"]  = soh_feat["soh_mean"].shift(2)
-                            soh_feat["soh_trend"] = soh_feat["soh_mean"].diff()
-                            soh_feat = soh_feat.dropna()
-                            if len(soh_feat) >= 5:
-                                res = train_regression_model(soh_feat, "soh_mean", soh_ml_model, exclude_cols=["type", "soh_min", "soh_max", "soh_spread"])
+                            sf = soh_h.copy()
+                            sf["soh_lag1"]  = sf["soh_mean"].shift(1)
+                            sf["soh_lag2"]  = sf["soh_mean"].shift(2)
+                            sf["soh_trend"] = sf["soh_mean"].diff()
+                            sf = sf.dropna()
+                            if len(sf) >= 5:
+                                res = train_regression_model(sf, "soh_mean", sml, exclude_cols=["type", "soh_min", "soh_max", "soh_spread"])
                                 st.session_state["soh_model_result"] = res
                                 display_model_metrics(res.metrics, res.cv_scores)
-                                fig_ap = plot_actual_vs_predicted(res.predictions_df, "SOH: Actual vs Predicted")
-                                if fig_ap: st.plotly_chart(fig_ap, use_container_width=True)
-                                fig_fi = plot_feature_importance(res.feature_importance_df, "SOH feature importance")
-                                if fig_fi: st.plotly_chart(fig_fi, use_container_width=True)
+                                for fg in [plot_actual_vs_predicted(res.predictions_df, "SOH: Actual vs Predicted"),
+                                           plot_feature_importance(res.feature_importance_df, "SOH feature importance")]:
+                                    if fg: st.plotly_chart(fg, use_container_width=True)
                             else:
                                 st.warning("Không đủ rows sau khi tạo lag features.")
                         except Exception as exc:
@@ -643,22 +734,20 @@ def main():
             else:
                 st.info("Bấm **Compute SOH & Forecast** để chạy phân tích.")
 
-    # ------------------------------------------------------------------ 8
+    # ---------------------------------------------------------------- 8
     with tabs[8]:
         st.subheader("Explainability")
-        choice = st.selectbox("Choose trained model",
-                              ["current_model_result", "thermal_model_result", "soh_model_result"],
-                              key="explain_choice")
+        choice = st.selectbox("Choose trained model", ["current_model_result", "thermal_model_result", "soh_model_result"], key="explain_choice")
         result = st.session_state.get(choice)
         if result is None:
             st.warning("Hãy train ít nhất một model trước.")
         else:
-            fig = plot_feature_importance(result.feature_importance_df, "Top factor ranking")
-            if fig: st.plotly_chart(fig, use_container_width=True)
+            fg = plot_feature_importance(result.feature_importance_df, "Top factor ranking")
+            if fg: st.plotly_chart(fg, use_container_width=True)
             st.text(auto_explanation_text(result.feature_importance_df, choice))
             st.code(summarize_feature_effects(result.feature_importance_df), language="text")
 
-    # ------------------------------------------------------------------ 9
+    # ---------------------------------------------------------------- 9
     with tabs[9]:
         st.subheader("Scenario Simulator")
         if feature_df.empty:
@@ -666,26 +755,26 @@ def main():
         else:
             a, b, c = st.columns(3)
             controls = {
-                "operating_temperature":    a.slider("Operating temperature (°C)", 0.0, 60.0, 25.0, 1.0),
-                "interconnection_resistance": b.slider("Interconnection resistance (mΩ)", 0.0, 5.0, 1.0, 0.1),
-                "chemistry":                c.selectbox("Chemistry", ["NMC", "NCA", "Mixed"]),
+                "operating_temperature":      a.slider("Operating temperature (°C)", 0.0, 60.0, 25.0, 1.0),
+                "interconnection_resistance":  b.slider("Interconnection resistance (mΩ)", 0.0, 5.0, 1.0, 0.1),
+                "chemistry":                   c.selectbox("Chemistry", ["NMC", "NCA", "Mixed"]),
             }
             d, e = st.columns(2)
             controls["ageing"]             = d.selectbox("Ageing status", ["unaged", "aged"])
             controls["ambient_temperature"] = e.slider("Ambient temperature (°C)", 0.0, 60.0, 25.0, 1.0)
-            scenario_df = build_scenario_row(feature_df, controls)
-            scenario_df = build_risk_scores(scenario_df)
-            st.dataframe(scenario_df, use_container_width=True)
-            for rec in rule_based_recommendations(scenario_df.iloc[0]):
+            sc_df = build_scenario_row(feature_df, controls)
+            sc_df = build_risk_scores(sc_df)
+            st.dataframe(sc_df, use_container_width=True)
+            for rec in rule_based_recommendations(sc_df.iloc[0]):
                 st.write(f"- {rec}")
 
-    # ----------------------------------------------------------------- 10
+    # --------------------------------------------------------------- 10
     with tabs[10]:
         st.subheader("Export")
         st.download_button(
             "⬇ Download engineered features as CSV",
-            data=feature_df.to_csv(index=False).encode("utf-8"),
-            file_name="engineered_features.csv", mime="text/csv",
+            feature_df.to_csv(index=False).encode("utf-8"),
+            "engineered_features.csv", "text/csv",
         )
         report_html = html_report(
             "Parallel Battery Analytics Report",
@@ -696,8 +785,8 @@ def main():
         )
         st.download_button(
             "⬇ Download HTML report",
-            data=report_html.encode("utf-8"),
-            file_name="parallel_battery_report.html", mime="text/html",
+            report_html.encode("utf-8"),
+            "parallel_battery_report.html", "text/html",
         )
 
 
