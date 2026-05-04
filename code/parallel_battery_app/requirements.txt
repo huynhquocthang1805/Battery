@@ -13,3 +13,5 @@ xgboost>=2.0.0
 statsmodels>=0.14.0
 kaleido>=0.2.1
 networkx>=3.2.0
+pyarrow>=14.0.0
+lz4>=4.3.0
