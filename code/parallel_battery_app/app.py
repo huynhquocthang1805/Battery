@@ -35,9 +35,9 @@ from src.graph_model import (
 )
 from src.inference import rule_based_recommendations
 from src.modeling import (
-    ModelingResult, MultiOutputModelingResult,   
+    ModelingResult, MultiOutputModelingResult,
     get_gpu_info, save_model, train_regression_model,
-    train_multi_output_model,                     
+    train_multi_output_model,
 )
 from src.preprocessing import prepare_data
 from src.soh_forecast import (
@@ -75,10 +75,56 @@ st.set_page_config(
 st.markdown(
     """
     <style>
+      /* ── Main area: dark background ── */
       .stApp { background: linear-gradient(180deg, #0f172a 0%, #111827 60%, #0b1220 100%); }
       .block-container { padding-top: 1rem; }
       h1, h2, h3, p, li, label, div { color: #e5e7eb; }
       div[data-testid="stMetricValue"] { font-size: 1.1rem; }
+
+      /* ── Sidebar: white background, all text black ── */
+      section[data-testid="stSidebar"] {
+        background: #ffffff !important;
+      }
+      section[data-testid="stSidebar"] *,
+      section[data-testid="stSidebar"] h1,
+      section[data-testid="stSidebar"] h2,
+      section[data-testid="stSidebar"] h3,
+      section[data-testid="stSidebar"] h4,
+      section[data-testid="stSidebar"] p,
+      section[data-testid="stSidebar"] label,
+      section[data-testid="stSidebar"] span,
+      section[data-testid="stSidebar"] div,
+      section[data-testid="stSidebar"] li,
+      section[data-testid="stSidebar"] a,
+      section[data-testid="stSidebar"] .stMarkdown,
+      section[data-testid="stSidebar"] .stCaption {
+        color: #1a1a1a !important;
+      }
+      /* Input / textarea trong sidebar */
+      section[data-testid="stSidebar"] input,
+      section[data-testid="stSidebar"] textarea {
+        color: #1a1a1a !important;
+        background: #f8f9fa !important;
+        border-color: #d1d5db !important;
+      }
+      /* Expander label */
+      section[data-testid="stSidebar"] details summary p {
+        color: #1a1a1a !important;
+      }
+      /* Checkbox / radio label */
+      section[data-testid="stSidebar"] .stCheckbox label p,
+      section[data-testid="stSidebar"] .stRadio label p {
+        color: #1a1a1a !important;
+      }
+      /* Code monospace */
+      section[data-testid="stSidebar"] code {
+        color: #374151 !important;
+        background: #f3f4f6 !important;
+      }
+      /* Horizontal divider */
+      section[data-testid="stSidebar"] hr {
+        border-color: #d1d5db !important;
+      }
     </style>
     """,
     unsafe_allow_html=True,
@@ -167,11 +213,10 @@ def build_scenario_row(feature_df: pd.DataFrame, controls: Dict[str, object]) ->
 
 @st.cache_data(show_spinner=False)
 def _st_load_bundle(path_str: str):
-    """Streamlit in-memory cache wrapping disk cache."""
     fp = fingerprint_path(path_str)
     obj = cache_get("bundle", fp)
     if obj is not None:
-        return obj, True          # (bundle, from_cache)
+        return obj, True
     bundle = load_dataset_bundle(path_str)
     cache_set("bundle", bundle, fp)
     return bundle, False
@@ -180,18 +225,13 @@ def _st_load_bundle(path_str: str):
 @st.cache_data(show_spinner=False)
 def _st_prepare_engineer(timeseries_df: pd.DataFrame, characterization_df: pd.DataFrame):
     fp = fingerprint_dfs(timeseries_df, characterization_df)
-
-    # prepared data
     prepared = cache_get("prepared_data", fp)
     if prepared is None:
         prepared = prepare_data(timeseries_df=timeseries_df, characterization_df=characterization_df)
         cache_set("prepared_data", prepared, fp)
-
     if prepared.timeseries_df.empty:
         return prepared, pd.DataFrame(), False
-
-    # feature table
-    feature_df = cache_get("feature_df", fp, )
+    feature_df = cache_get("feature_df", fp)
     from_cache  = feature_df is not None
     if feature_df is None:
         feature_df = build_feature_table_from_timeseries(prepared.timeseries_df)
@@ -200,7 +240,6 @@ def _st_prepare_engineer(timeseries_df: pd.DataFrame, characterization_df: pd.Da
         if not feature_df.empty:
             feature_df = build_risk_scores(feature_df)
         cache_set("feature_df", feature_df, fp, use_parquet=True)
-
     return prepared, feature_df, from_cache
 
 
@@ -213,26 +252,20 @@ def _model_cache_key(model_type: str, target: str, model_name: str) -> str:
 
 
 def save_model_to_cache(result, model_type: str) -> None:
-    if hasattr(result, "target_col"):
-        tgt = result.target_col
-    else:
-        tgt = "_".join(result.target_cols)
+    tgt = result.target_col if hasattr(result, "target_col") else "_".join(result.target_cols)
     key = _model_cache_key(model_type, tgt, result.model_name)
-    fp  = f"{tgt}_{result.model_name}_{result.trained_at}"
-    cache_set(key, result, fingerprint=fp)
+    cache_set(key, result, fingerprint=f"{tgt}_{result.model_name}_{result.trained_at}")
+
 
 def load_model_from_cache(model_type: str, target: str, model_name: str) -> Optional[ModelingResult]:
     key = _model_cache_key(model_type, target, model_name)
-    meta_list = cache_list()
-    entry = next((m for m in meta_list if m["key"] == key), None)
+    entry = next((m for m in cache_list() if m["key"] == key), None)
     if entry is None:
         return None
-    fp = f"{target}_{model_name}_"    # partial match — just load whatever is saved
-    # use a wildcard: read meta directly
-    from src.cache_manager import _load_meta, get_cache_dir, _read_object
-    d     = get_cache_dir()
-    meta  = _load_meta(d)
-    info  = meta.get(key, {})
+    from src.cache_manager import _load_meta, _read_object
+    d    = get_cache_dir()
+    meta = _load_meta(d)
+    info = meta.get(key, {})
     if not info:
         return None
     return _read_object(d, key, use_parquet=info.get("parquet", False))
@@ -244,7 +277,6 @@ def load_model_from_cache(model_type: str, target: str, model_name: str) -> Opti
 
 def _render_sidebar_info():
     gpu = get_gpu_info()
-
     with st.sidebar:
         st.markdown("---")
         st.markdown("### ⚡ Accelerator")
@@ -329,8 +361,8 @@ def main():
         return
 
     grouped = classify_tables(bundle)
-    grouped["timeseries"]      = filter_useful_timeseries_tables(grouped.get("timeseries",[])) or grouped.get("timeseries",[])
-    grouped["characterization"]= filter_useful_characterization_tables(grouped.get("characterization",[])) or grouped.get("characterization",[])
+    grouped["timeseries"]       = filter_useful_timeseries_tables(grouped.get("timeseries",[])) or grouped.get("timeseries",[])
+    grouped["characterization"] = filter_useful_characterization_tables(grouped.get("characterization",[])) or grouped.get("characterization",[])
 
     ts_options   = [f"{t.source_file}::{t.table_name}" for t in grouped.get("timeseries",[])]
     char_options = [f"{t.source_file}::{t.table_name}" for t in grouped.get("characterization",[])]
@@ -473,7 +505,6 @@ def main():
         mname = st.selectbox("Model",        ["Linear Regression","Ridge","Random Forest","XGBoost"], key=f"{tab_key}_model")
         grp   = st.selectbox("Group column", ["<none>"]+[c for c in ["test_id","module_id","source_file"] if c in feature_df.columns], key=f"{tab_key}_group")
 
-        # -- try auto-load saved model ------------------------------------
         saved = load_model_from_cache(tab_key, tgt, mname)
         if saved is not None and st.session_state.get(f"{tab_key}_model_result") is None:
             st.session_state[f"{tab_key}_model_result"] = saved
@@ -484,7 +515,6 @@ def main():
         force_retrain = col_btn2.checkbox("Force retrain", key=f"force_{tab_key}")
 
         if train_clicked:
-            # honour cache unless force_retrain
             if not force_retrain:
                 cached_res = load_model_from_cache(tab_key, tgt, mname)
                 if cached_res is not None:
@@ -583,7 +613,6 @@ def main():
                 sc=grp_cands[0]; sv=st.selectbox("Test condition (SOH)",soh_raw[sc].astype(str).unique().tolist(),key="soh_case")
                 soh_raw=soh_raw[soh_raw[sc].astype(str)==sv].copy()
 
-            # auto-load SOH from cache
             soh_fp = fingerprint_dfs(soh_raw)
             if st.session_state.get("soh_hist") is None:
                 cached_soh = cache_get("soh_hist", soh_fp)
