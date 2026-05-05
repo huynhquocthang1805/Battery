@@ -34,7 +34,11 @@ from src.graph_model import (
     plot_gcn_features,
 )
 from src.inference import rule_based_recommendations
-from src.modeling import ModelingResult, get_gpu_info, save_model, train_regression_model
+from src.modeling import (
+    ModelingResult, MultiOutputModelingResult,   
+    get_gpu_info, save_model, train_regression_model,
+    train_multi_output_model,                     
+)
 from src.preprocessing import prepare_data
 from src.soh_forecast import (
     estimate_rul,
@@ -208,11 +212,14 @@ def _model_cache_key(model_type: str, target: str, model_name: str) -> str:
     return f"model_{model_type}_{target}_{model_name}".replace(" ", "_")
 
 
-def save_model_to_cache(result: ModelingResult, model_type: str) -> None:
-    key = _model_cache_key(model_type, result.target_col, result.model_name)
-    fp  = f"{result.target_col}_{result.model_name}_{result.trained_at}"
+def save_model_to_cache(result, model_type: str) -> None:
+    if hasattr(result, "target_col"):
+        tgt = result.target_col
+    else:
+        tgt = "_".join(result.target_cols)
+    key = _model_cache_key(model_type, tgt, result.model_name)
+    fp  = f"{tgt}_{result.model_name}_{result.trained_at}"
     cache_set(key, result, fingerprint=fp)
-
 
 def load_model_from_cache(model_type: str, target: str, model_name: str) -> Optional[ModelingResult]:
     key = _model_cache_key(model_type, target, model_name)
