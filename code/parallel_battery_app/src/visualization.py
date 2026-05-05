@@ -21,6 +21,14 @@ _DARK_BG   = "#111827"
 _DARK_PLOT = "#1f2937"
 _FONT_CLR  = "#e5e7eb"
 
+# Legend style: white box, black text — readable on both dark chart + light sidebar
+_LEGEND = dict(
+    bgcolor="rgba(255,255,255,0.95)",
+    bordercolor="#d1d5db",
+    borderwidth=1,
+    font=dict(color="#1a1a1a", size=12),
+)
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -35,7 +43,7 @@ def _dark_layout(fig, title: str, xaxis_title: str = "",
         font=dict(color=_FONT_CLR),
         xaxis=dict(title=xaxis_title, gridcolor="#374151", zerolinecolor="#4b5563"),
         yaxis=dict(title=yaxis_title, gridcolor="#374151", zerolinecolor="#4b5563"),
-        legend=dict(bgcolor="rgba(0,0,0,0.35)", bordercolor="#374151"),
+        legend=_LEGEND,
         height=height,
         margin=dict(l=50, r=20, t=55, b=45),
     )
@@ -94,7 +102,7 @@ def plot_ocv_curves(df, x_col, y_cols):
     for y in y_cols:
         if y in df.columns:
             fig.add_trace(go.Scatter(x=df[x_col], y=df[y], mode="lines", name=y))
-    fig.update_layout(title="OCV curves")
+    fig.update_layout(title="OCV curves", legend=_LEGEND)
     return fig
 
 
@@ -194,10 +202,9 @@ def plot_cell_deviation_from_mean(
     fig.add_hline(y=0.0, line_dash="dot", line_color="#6b7280", line_width=1)
 
     for idx, col in enumerate(valid):
-        dev   = (mat[col] - mu) * scale_factor
-        lbl   = _short(col)
-        color = _CELL_COLORS[idx % len(_CELL_COLORS)]
-        # _hex_to_rgba converts "#60a5fa" -> "rgba(96,165,250,0.13)"
+        dev        = (mat[col] - mu) * scale_factor
+        lbl        = _short(col)
+        color      = _CELL_COLORS[idx % len(_CELL_COLORS)]
         fill_color = _hex_to_rgba(color, alpha=0.13)
         fig.add_trace(go.Scatter(
             x=df[time_col], y=dev,
@@ -338,7 +345,7 @@ def plot_imbalance_dashboard(
             legendgroup=f"r{idx}",
         ), row=1, col=1)
 
-    # panel 2: deviation from mean  — use rgba(), NOT hex+"22"
+    # panel 2: deviation from mean
     for idx, col in enumerate(valid):
         dev        = (mat[col] - mu) * scale_factor
         color      = _CELL_COLORS[idx % len(_CELL_COLORS)]
@@ -385,7 +392,7 @@ def plot_imbalance_dashboard(
         font=dict(color=_FONT_CLR),
         height=720,
         margin=dict(l=55, r=20, t=85, b=45),
-        legend=dict(bgcolor="rgba(0,0,0,0.35)", bordercolor="#374151"),
+        legend=_LEGEND,
     )
     for ax in fig.layout:
         if ax.startswith(("xaxis", "yaxis")):
