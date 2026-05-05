@@ -22,6 +22,10 @@ _DARK_PLOT = "#1f2937"
 _FONT_CLR  = "#e5e7eb"
 
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
 def _dark_layout(fig, title: str, xaxis_title: str = "",
                  yaxis_title: str = "", height: int = 420):
     fig.update_layout(
@@ -39,6 +43,7 @@ def _dark_layout(fig, title: str, xaxis_title: str = "",
 
 
 def _short(col: str) -> str:
+    """Turn 'current_a_cell_1' -> 'C1', 'temperature_c_cell_2' -> 'T2'."""
     c = col.lower()
     for pre in ("current_a_cell_", "temperature_c_cell_",
                 "current_a_", "temperature_c_", "temp_cell_", "cell_"):
@@ -47,6 +52,20 @@ def _short(col: str) -> str:
             prefix_char = "C" if "current" in pre else "T"
             return f"{prefix_char}{suffix}"
     return col
+
+
+def _hex_to_rgba(hex_color: str, alpha: float = 0.13) -> str:
+    """
+    Convert a 6-character hex color (#rrggbb) to an rgba() string.
+    Plotly does NOT accept 8-character hex (#rrggbbaa) — always use rgba().
+    """
+    h = hex_color.lstrip("#")
+    if len(h) != 6:
+        return f"rgba(96,165,250,{alpha})"   # safe fallback (blue)
+    r = int(h[0:2], 16)
+    g = int(h[2:4], 16)
+    b = int(h[4:6], 16)
+    return f"rgba({r},{g},{b},{alpha})"
 
 
 # ---------------------------------------------------------------------------
@@ -150,7 +169,7 @@ def scenario_comparison_bar(df, x_col, y_cols, title):
 
 
 # ---------------------------------------------------------------------------
-# NEW: delta / imbalance plots
+# Delta / imbalance plots
 # ---------------------------------------------------------------------------
 
 def plot_cell_deviation_from_mean(
@@ -161,7 +180,10 @@ def plot_cell_deviation_from_mean(
     scale_factor: float = 1.0,
     unit_label: str = "",
 ) -> go.Figure:
-    """Each cell's deviation from the module mean, amplified by scale_factor."""
+    """
+    For each cell: deviation_i = (cell_i − mean_of_all_cells) × scale_factor.
+    Fill area between the trace and y=0 to emphasise the imbalance region.
+    """
     valid = [c for c in cell_cols if c in df.columns]
     if not valid or time_col not in df.columns:
         return go.Figure()
@@ -172,18 +194,21 @@ def plot_cell_deviation_from_mean(
     fig.add_hline(y=0.0, line_dash="dot", line_color="#6b7280", line_width=1)
 
     for idx, col in enumerate(valid):
-        dev = (mat[col] - mu) * scale_factor
-        lbl = _short(col)
+        dev   = (mat[col] - mu) * scale_factor
+        lbl   = _short(col)
         color = _CELL_COLORS[idx % len(_CELL_COLORS)]
+        # _hex_to_rgba converts "#60a5fa" -> "rgba(96,165,250,0.13)"
+        fill_color = _hex_to_rgba(color, alpha=0.13)
         fig.add_trace(go.Scatter(
             x=df[time_col], y=dev,
-            mode="lines", name=f"D-{lbl}",
+            mode="lines",
+            name=f"D-{lbl}",
             line=dict(width=1.8, color=color),
             fill="tozeroy",
-            fillcolor=color + "22",
+            fillcolor=fill_color,
         ))
 
-    ylab = (f"(cell-mean) x {scale_factor:.3g}  {unit_label}").strip()
+    ylab = f"(cell - mean) x {scale_factor:.3g}  {unit_label}".strip()
     _dark_layout(fig, title, xaxis_title=time_col, yaxis_title=ylab, height=380)
     return fig
 
@@ -198,8 +223,8 @@ def plot_pairwise_delta(
     show_abs: bool = False,
 ) -> go.Figure:
     """
-    C(N,2) pairs of delta traces.
-    4 cells -> 6 pairs: C1-C2, C1-C3, C1-C4, C2-C3, C2-C4, C3-C4
+    C(N,2) pair traces.  4 cells → 6 pairs: C1-C2, C1-C3, C1-C4, C2-C3, C2-C4, C3-C4.
+    show_abs=True plots |Δ_ij| so all curves stay positive.
     """
     valid = [c for c in cell_cols if c in df.columns]
     if len(valid) < 2 or time_col not in df.columns:
@@ -223,7 +248,7 @@ def plot_pairwise_delta(
             line=dict(width=1.6, color=_DELTA_COLORS[pidx % len(_DELTA_COLORS)]),
         ))
 
-    ylab = (f"delta x {scale_factor:.3g}  {unit_label}").strip()
+    ylab = f"delta x {scale_factor:.3g}  {unit_label}".strip()
     _dark_layout(fig, title, xaxis_title=time_col, yaxis_title=ylab, height=400)
     return fig
 
@@ -237,7 +262,7 @@ def plot_rolling_imbalance(
     scale_factor: float = 1.0,
     unit_label: str = "",
 ) -> go.Figure:
-    """Rolling cross-cell standard deviation, showing imbalance trend."""
+    """Rolling cross-cell σ — shows whether imbalance is growing over time."""
     valid = [c for c in cell_cols if c in df.columns]
     if not valid or time_col not in df.columns:
         return go.Figure()
@@ -264,7 +289,7 @@ def plot_rolling_imbalance(
         line=dict(width=1.4, color="#f97316", dash="dash"),
     ))
 
-    ylab = (f"sigma x {scale_factor:.3g}  {unit_label}").strip()
+    ylab = f"sigma x {scale_factor:.3g}  {unit_label}".strip()
     _dark_layout(fig, title, xaxis_title=time_col, yaxis_title=ylab, height=360)
     return fig
 
@@ -280,8 +305,8 @@ def plot_imbalance_dashboard(
 ) -> go.Figure:
     """
     4-panel subplot:
-      [1,1] Raw signals        [1,2] Deviation from mean x k
-      [2,1] Pairwise |delta|   [2,2] Rolling sigma x k
+      [1,1] Raw signals        [1,2] Deviation from mean × k
+      [2,1] Pairwise |delta|   [2,2] Rolling sigma × k
     """
     valid = [c for c in cell_cols if c in df.columns]
     if not valid or time_col not in df.columns:
@@ -313,15 +338,17 @@ def plot_imbalance_dashboard(
             legendgroup=f"r{idx}",
         ), row=1, col=1)
 
-    # panel 2: deviation from mean
+    # panel 2: deviation from mean  — use rgba(), NOT hex+"22"
     for idx, col in enumerate(valid):
-        dev = (mat[col] - mu) * scale_factor
-        color = _CELL_COLORS[idx % len(_CELL_COLORS)]
+        dev        = (mat[col] - mu) * scale_factor
+        color      = _CELL_COLORS[idx % len(_CELL_COLORS)]
+        fill_color = _hex_to_rgba(color, alpha=0.13)
         fig.add_trace(go.Scatter(
             x=t, y=dev, mode="lines",
             name=f"D-{_short(col)}",
             line=dict(width=1.6, color=color),
-            fill="tozeroy", fillcolor=color + "22",
+            fill="tozeroy",
+            fillcolor=fill_color,
             legendgroup=f"d{idx}", showlegend=True,
         ), row=1, col=2)
 
@@ -372,7 +399,7 @@ def plot_delta_stats_bar(
     scale_factor: float = 1.0,
     unit_label: str = "",
 ) -> go.Figure:
-    """Bar chart: mean and max |delta_ij| for every cell pair."""
+    """Summary bar: mean ± std and max |Δ_ij| for every cell pair."""
     valid = [c for c in cell_cols if c in df.columns]
     if len(valid) < 2:
         return go.Figure()
